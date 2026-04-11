@@ -1,0 +1,1 @@
+Always review the active project state file first, then check the rolling shutdown artifact for the latest persisted session checkpoint before planning or editing. Use repo context files only as private repo-scoped guidance, and keep project tracking in the project state file.

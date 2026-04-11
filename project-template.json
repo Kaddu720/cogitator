@@ -1,0 +1,26 @@
+{
+  "id": "example-project",
+  "name": "Example Project",
+  "description": "Short description shown in the project picker",
+  "stateFile": "state.md",
+  "artifactsDir": "artifacts",
+  "repos": [
+    {
+      "path": "/path/to/repo-one",
+      "name": "repo-one",
+      "role": "primary"
+    },
+    {
+      "path": "/path/to/repo-two",
+      "name": "repo-two",
+      "role": "supporting"
+    }
+  ],
+  "repoContexts": [
+    "repoContexts/repo-one-private.md"
+  ],
+  "tags": [
+    "infra",
+    "migration"
+  ]
+}

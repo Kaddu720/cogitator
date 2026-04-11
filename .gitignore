@@ -1,0 +1,6 @@
+# direnv
+.direnv/
+
+# Nix build artifacts
+result
+result-*
