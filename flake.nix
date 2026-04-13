@@ -534,12 +534,8 @@ PY
                 exit 1
               fi
 
-              if [[ "$bind_host_pi_auth" -eq 1 && ! -e "$host_pi_auth_json" ]]; then
-                printf '{}\n' > "$host_pi_auth_json"
-              fi
-
               agent_dir_host="$(mktemp -d)"
-              trap 'rm -rf "$agent_dir_host"' EXIT
+              trap 'if [[ -n "$host_pi_auth_json" && -e "$agent_dir_host/auth.json" ]]; then cp "$agent_dir_host/auth.json" "$host_pi_auth_json"; fi; rm -rf "$agent_dir_host"' EXIT
               cat > "$agent_dir_host/cogitator-models.json" <<'EOF'
 ${builtins.toJSON piModelsConfig}
 EOF
@@ -610,7 +606,7 @@ with open(sys.argv[3], "w", encoding="utf-8") as handle:
     json.dump(result, handle, indent=2)
     handle.write("\n")
 PY
-              if [[ "$bind_host_pi_auth" -eq 1 && -n "$host_pi_auth_json" && -e "$host_pi_auth_json" ]]; then
+              if [[ -n "$host_pi_auth_json" && -e "$host_pi_auth_json" ]]; then
                 cp "$host_pi_auth_json" "$agent_dir_host/auth.json"
               fi
 
@@ -874,7 +870,7 @@ PY
 
               bwrap_args+=("''${bind_args[@]}")
 
-              exec ${pkgs.bubblewrap}/bin/bwrap \
+              ${pkgs.bubblewrap}/bin/bwrap \
                 "''${bwrap_args[@]}" \
                 ${piPkg}/bin/pi \
                 "''${pi_args[@]}"
