@@ -2,6 +2,16 @@
 
 Sandboxed `pi` launcher for NixOS using `bubblewrap`, plus a bundled workflow-mode extension for project-aware sessions.
 
+## Documentation
+
+Detailed reference docs live in `docs/`:
+
+- [Architecture](docs/architecture.md) — module map, import rules, runtime state, directory boundaries, sandbox model
+- [Approval Flow](docs/approval-flow.md) — proposal lifecycle, per-change approval, sequence gating, mode interactions
+- [Project Model](docs/project-model.md) — control root structure, project.json schema, state template, linked repos, shutdown checkpoints
+- [Mode System](docs/mode-system.md) — available modes (plan, normal, readonly, creative), descriptors, write policies, tool allowlists
+- [Testing](docs/testing.md) — running unit tests, test structure, coverage targets
+
 ## What this flake provides
 
 - self-contained packaged `pi`
@@ -49,7 +59,7 @@ Expected project layout:
 
 Template and shared resource files included here:
 
-- `/home/kaddu/.config/cogitator/project-template.json`
+- `/home/kaddu/.config/cogitator/resources/templates/project-template.json`
 - `/home/kaddu/.config/cogitator/resources/templates/project-state-template.md`
 - `/home/kaddu/.config/cogitator/resources/prompts/`
 
@@ -188,6 +198,27 @@ Notes:
 - typed selector actions such as `reject <id>` and `edit <id>: ...` can target already-approved proposals when you need to revise or clear them
 - in `/plan`, the gate is combined with the project-state/artifact-only write policy
 - in all modes, `bash` commands containing `sops` are blocked
+
+## Manual validation / smoke checks
+
+Basic checks we have been using during refactors:
+
+1. Restart `cogi` and ask `What mode am I in?`
+   - expected: startup defaults to `/plan`
+2. Run `/normal`, then ask again.
+   - expected: reported mode changes to `normal`
+3. Run `/plan`, then attempt a direct repo file mutation such as `extensions/workflow-mode.ts` without a proposal.
+   - expected: blocked with the plan-mode repo write scope diagnostic
+4. Still in `/plan`, attempt an unsafe bash command such as `rm -rf /tmp/test`.
+   - expected: blocked because plan mode only allows safe read-only bash
+5. Run `/normal`, then attempt a direct unapproved `write` or `edit` on a repo file.
+   - expected: blocked by the transactional approval gate with `No approved proposal matches this path.`
+6. Run `/readonly`, then attempt a mutation.
+   - expected: mutation tools are unavailable or the mutation is blocked because read-only mode disables file changes
+7. Exit `cogi` and inspect `<control-root>/projects/<id>/artifacts/latest-shutdown.md`.
+   - expected: fresh `saved_at` timestamp and the current mode/session info are persisted
+
+These checks are intentionally small and safe. When testing writes, prefer tiny artifact-only attempts or blocked repo-path attempts so validation does not leave accidental code changes behind.
 
 ## Run
 
@@ -406,6 +437,16 @@ Useful flags:
 - `--tag TAG` (repeatable)
 - `--context PATH` (repeatable, relative to the project dir)
 - `--force`
+
+## Testing
+
+Run unit tests (requires `tsx`):
+
+```bash
+npx tsx extensions/tests/unit.ts
+```
+
+See [docs/testing.md](docs/testing.md) for details on test structure and coverage.
 
 ## Extra binds
 

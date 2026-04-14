@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 
 // ─── Mode ─────────────────────────────────────────────────────────────────────
 
-export type Mode = "normal" | "readonly" | "plan";
+export type Mode = "normal" | "readonly" | "plan" | "creative";
 
 // ─── Session-entry storage shapes ─────────────────────────────────────────────
 
@@ -25,8 +25,17 @@ export function restoreMode(ctx: ExtensionContext): Mode | undefined {
   for (const entry of ctx.sessionManager.getBranch()) {
     if (entry.type === "custom" && entry.customType === "workflow-mode") {
       const data = entry.data as StoredModeState | undefined;
-      if (data?.mode === "normal" || data?.mode === "readonly" || data?.mode === "plan") {
+      if (
+        data?.mode === "normal" ||
+        data?.mode === "readonly" ||
+        data?.mode === "plan" ||
+        data?.mode === "creative"
+      ) {
         restored = data.mode;
+      } else if (data?.mode === "architect") {
+        restored = "plan";
+      } else if (data?.mode === "executor") {
+        restored = "normal";
       }
     }
   }

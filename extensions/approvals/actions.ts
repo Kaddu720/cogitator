@@ -60,7 +60,7 @@ export function getApplyingProposals(deps: ApprovalActionDeps): PendingProposal[
 }
 
 export function getRejectableProposals(deps: ApprovalActionDeps): PendingProposal[] {
-  return deps.proposals().filter((p) => p.status === "pending" || p.status === "approved");
+  return deps.proposals().filter((p) => p.status === "pending" || p.status === "approved" || p.status === "applying");
 }
 
 export function getProposalsForResolvedPath(deps: ApprovalActionDeps, resolvedPath: string): PendingProposal[] {
@@ -97,8 +97,8 @@ export function parseSelectorList(value: string): string[] {
 /** Return the proposal statuses that are valid sources for a transition to `status`. */
 export function getAllowedStatusesForTransition(status: ProposalStatus): ProposalStatus[] {
   if (status === "approved") return ["pending"];
-  if (status === "deferred") return ["pending", "approved", "needs_revision"];
-  return ["pending", "approved"];
+  if (status === "deferred") return ["pending", "approved", "applying", "needs_revision"];
+  return ["pending", "approved", "applying"];
 }
 
 // ─── Mutation helpers ───────────────────────────────────────────────────────────
@@ -139,24 +139,16 @@ export function updateProposalStatusBySelectors(
 }
 
 /**
- * Transition the proposal for `resolvedPath` from approved → applying.
- * Returns the applying proposal, or undefined if none is authorized.
- *
- * Body changes from workflow-mode.ts:
- *   persistApprovalState()  → deps.persist()
- *   updateStatus(ctx)       → deps.updateStatus(ctx)
+ * Return the unique authorized proposal for `resolvedPath` without mutating
+ * proposal state. This keeps tool-call authorization non-sticky so a
+ * successful file mutation followed by a resume/provider failure does not
+ * leave the proposal wedged in `applying`.
  */
 export function beginApplyingProposalForPath(
   deps: ApprovalActionDeps,
   resolvedPath: string,
-  ctx: ExtensionContext,
+  _ctx: ExtensionContext,
 ): PendingProposal | undefined {
-  const proposal = findAuthorizedProposalForPath(deps, resolvedPath);
-  if (!proposal) return undefined;
-  if (proposal.status === "applying") return proposal;
-  updateProposalStatusById(deps, [proposal.id], "applying");
-  deps.persist();
-  deps.updateStatus(ctx);
   return findAuthorizedProposalForPath(deps, resolvedPath);
 }
 

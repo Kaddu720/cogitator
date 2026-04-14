@@ -28,6 +28,8 @@ export interface CommandHandlers {
   normal: CommandHandler;
   readonly: CommandHandler;
   plan: CommandHandler;
+  creative: CommandHandler;
+  "alt-model": CommandHandler;
 }
 
 export interface ShortcutHandlers {
@@ -86,7 +88,7 @@ export function registerCommands(
   });
 
   pi.registerCommand("normal", {
-    description: "Enable normal mode with full tool access",
+    description: "Enable normal mode with full tool access and GPT-5.4-mini by default",
     handler: commands.normal,
   });
 
@@ -96,8 +98,18 @@ export function registerCommands(
   });
 
   pi.registerCommand("plan", {
-    description: "Toggle plan mode with project state/artifact writes allowed",
+    description: "Toggle plan mode with project state/artifact writes allowed and Claude Opus 4.6 by default",
     handler: commands.plan,
+  });
+
+  pi.registerCommand("creative", {
+    description: "Enable creative mode with normal-mode permissions and free model selection",
+    handler: commands.creative,
+  });
+
+  pi.registerCommand("alt-model", {
+    description: "Toggle the current mode's alternate model when available",
+    handler: commands["alt-model"],
   });
 
   pi.registerShortcut("ctrl+alt+p", {

@@ -69,13 +69,22 @@ import {
   loadProtectedPaths,
   getModeTools,
   getModeDescriptor,
+  getReadAccessPolicy,
+  hasReasonableSearchLimit,
+  isBroadInspectionBash,
+  isBroadSearchPath,
   isSafeCommand,
+  isWindowedReadRequest,
+  getRequestedReadLimit,
+  getRequestedSearchLimit,
+  requiresSearchGlob,
   formatMode,
   projectStatusLine,
   readPromptFragment,
   CHANGE_PROPOSAL_WORKFLOW_PROMPT_PATH,
   SECRET_SAFETY_PROMPT_PATH,
   PROJECT_CONTEXT_GUIDANCE_PROMPT_PATH,
+  TARGETED_FILE_ACCESS_PROMPT_PATH,
 } from "./resources.js";
 
 // ─── Helpers retained in workflow-mode ─────────────────────────────────────────
@@ -110,7 +119,21 @@ function describeMutation(event: { toolName: string; input: Record<string, unkno
   return undefined;
 }
 
+function formatErrorDetails(error: unknown): string {
+  if (error instanceof Error) return error.stack ?? `${error.name}: ${error.message}`;
+  return String(error);
+}
+
 // ─── Runtime state ──────────────────────────────────────────────────────────────
+
+interface ReadLedgerEntry {
+  fullRead: boolean;
+  readCount: number;
+  lastReadAt: number;
+  lastWindowStart?: number;
+  lastWindowEnd?: number;
+  contiguousWindowedLines?: number;
+}
 
 interface WorkflowRuntimeState {
   currentMode: Mode;
@@ -120,6 +143,8 @@ interface WorkflowRuntimeState {
   approvalPromptInFlight: boolean;
   approvalPromptDeferred: boolean;
   approvalResumePending: boolean;
+  proposalOnlyRequested: boolean;
+  readLedger: Map<string, ReadLedgerEntry>;
 }
 
 // ─── Extension entry point ──────────────────────────────────────────────────────
@@ -135,6 +160,8 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     approvalPromptInFlight: false,
     approvalPromptDeferred: false,
     approvalResumePending: false,
+    proposalOnlyRequested: false,
+    readLedger: new Map(),
   };
 
   // ─── Proposal state accessors ─────────────────────────────────────────────────
@@ -142,6 +169,91 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
   const ps = () => state.pendingProposals;
 
   function persistApprovalState(): void { persistApprovalGateState(pi, ps()); }
+
+  // ─── Read ledger helpers ──────────────────────────────────────────────────────
+
+  function getReadLedgerPath(path: string, ctx: ExtensionContext): string {
+    return resolveFrom(ctx.cwd, normalizeInputPath(path), state.activeRepoRoot);
+  }
+
+  function getRequestedReadWindow(input: Record<string, unknown>): { start: number; end: number; size: number } | null {
+    const limit = getRequestedReadLimit(input);
+    if (limit === undefined) return null;
+    const offsetRaw = typeof input.offset === "number" && Number.isFinite(input.offset) ? Math.trunc(input.offset) : 1;
+    const start = offsetRaw > 0 ? offsetRaw : 1;
+    return { start, end: start + limit - 1, size: limit };
+  }
+
+  function recordFullRead(path: string, ctx: ExtensionContext): ReadLedgerEntry {
+    const resolvedPath = getReadLedgerPath(path, ctx);
+    const next: ReadLedgerEntry = {
+      fullRead: true,
+      readCount: (state.readLedger.get(resolvedPath)?.readCount ?? 0) + 1,
+      lastReadAt: Date.now(),
+      lastWindowStart: undefined,
+      lastWindowEnd: undefined,
+      contiguousWindowedLines: undefined,
+    };
+    state.readLedger.set(resolvedPath, next);
+    return next;
+  }
+
+  function wouldBecomeWindowedSweep(path: string, window: { start: number; end: number }, ctx: ExtensionContext, threshold: number): boolean {
+    const resolvedPath = getReadLedgerPath(path, ctx);
+    const previous = state.readLedger.get(resolvedPath);
+    if (!previous || previous.fullRead || previous.lastWindowStart === undefined || previous.lastWindowEnd === undefined) return false;
+    const adjacent = window.start <= previous.lastWindowEnd + 1 && window.end >= previous.lastWindowStart - 1;
+    if (!adjacent) return false;
+    const mergedStart = Math.min(previous.lastWindowStart, window.start);
+    const mergedEnd = Math.max(previous.lastWindowEnd, window.end);
+    return (mergedEnd - mergedStart + 1) > threshold;
+  }
+
+  function recordWindowedRead(path: string, window: { start: number; end: number; size: number }, ctx: ExtensionContext): ReadLedgerEntry {
+    const resolvedPath = getReadLedgerPath(path, ctx);
+    const previous = state.readLedger.get(resolvedPath);
+    let lastWindowStart = window.start;
+    let lastWindowEnd = window.end;
+    let contiguousWindowedLines = window.size;
+    if (previous && !previous.fullRead && previous.lastWindowStart !== undefined && previous.lastWindowEnd !== undefined) {
+      const adjacent = window.start <= previous.lastWindowEnd + 1 && window.end >= previous.lastWindowStart - 1;
+      if (adjacent) {
+        lastWindowStart = Math.min(previous.lastWindowStart, window.start);
+        lastWindowEnd = Math.max(previous.lastWindowEnd, window.end);
+        contiguousWindowedLines = lastWindowEnd - lastWindowStart + 1;
+      }
+    }
+    const next: ReadLedgerEntry = {
+      fullRead: false,
+      readCount: (previous?.readCount ?? 0) + 1,
+      lastReadAt: Date.now(),
+      lastWindowStart,
+      lastWindowEnd,
+      contiguousWindowedLines,
+    };
+    state.readLedger.set(resolvedPath, next);
+    return next;
+  }
+
+  function hasRepeatedIdenticalTopWindowRead(path: string, window: { start: number; end: number }, ctx: ExtensionContext): boolean {
+    const resolvedPath = getReadLedgerPath(path, ctx);
+    const previous = state.readLedger.get(resolvedPath);
+    if (!previous || previous.fullRead) return false;
+    return previous.lastWindowStart === window.start && previous.lastWindowEnd === window.end && window.start === 1;
+  }
+
+  function hasRepeatedFullReread(path: string, ctx: ExtensionContext): boolean {
+    const resolvedPath = getReadLedgerPath(path, ctx);
+    return (state.readLedger.get(resolvedPath)?.fullRead ?? false) && (state.readLedger.get(resolvedPath)?.readCount ?? 0) > 0;
+  }
+
+  function isRefreshExemptReadPath(path: string, ctx: ExtensionContext): boolean {
+    if (!state.activeProject) return false;
+    const resolvedPath = getReadLedgerPath(path, ctx);
+    const statePath = getProjectStatePath(state.activeProject);
+    const shutdownArtifactPath = resolve(getProjectArtifactsPath(state.activeProject), "latest-shutdown.md");
+    return resolvedPath === statePath || resolvedPath === shutdownArtifactPath;
+  }
 
   // ─── Mode and status ───────────────────────────────────────────────────────────
 
@@ -158,14 +270,123 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     ctx.ui.setStatus("cogitator", colored);
   }
 
-  function applyMode(mode: Mode, ctx: ExtensionContext, notify = true): void {
+  interface ModeModelTarget {
+    provider: string;
+    modelId: string;
+  }
+
+  interface ModeModelPair {
+    primary: ModeModelTarget;
+    alternate: ModeModelTarget;
+  }
+
+  const MODE_MODEL_PAIRS: Partial<Record<Mode, ModeModelPair>> = {
+    plan: {
+      primary: { provider: "anthropic", modelId: "claude-opus-4-6" },
+      alternate: { provider: "azure", modelId: "gpt-5.4-kaddu" },
+    },
+    normal: {
+      primary: { provider: "azure", modelId: "gpt-5.4-kaddu" },
+      alternate: { provider: "anthropic", modelId: "claude-sonnet-4-5" },
+    },
+  };
+
+  function getRestoredStartupMode(restoredMode: Mode | undefined): Mode {
+    if (!restoredMode) return "plan";
+    return getModeDescriptor(restoredMode).persistAcrossRestart ? restoredMode : "plan";
+  }
+
+  function getRestoredTreeMode(restoredMode: Mode | undefined): Mode {
+    return restoredMode ?? "plan";
+  }
+
+  function isCurrentModelTarget(target: ModeModelTarget, ctx: ExtensionContext): boolean {
+    return ctx.model?.provider === target.provider && ctx.model?.id === target.modelId;
+  }
+
+  function requiresAnthropicSafety(target: ModeModelTarget): boolean {
+    return target.provider === "anthropic";
+  }
+
+  async function switchToModelTarget(
+    target: ModeModelTarget,
+    ctx: ExtensionContext,
+    reason: string,
+    notifyOnSuccess = false,
+  ): Promise<boolean> {
+    if (requiresAnthropicSafety(target) && !ctx.isIdle()) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `Switched mode, but deferred model change to ${target.provider}/${target.modelId}. Anthropic model switching is only allowed at an idle turn boundary. Wait for the current turn to finish, then run /alt-model or switch modes again.`,
+          "warning",
+        );
+      }
+      return false;
+    }
+
+    const model = ctx.modelRegistry.find(target.provider, target.modelId);
+    if (!model) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `Switched mode, but ${target.provider}/${target.modelId} is not available in this session. Keeping the current model for ${reason}.`,
+          "warning",
+        );
+      }
+      return false;
+    }
+
+    const changed = await pi.setModel(model);
+    if (!changed) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `Switched mode, but pi could not activate ${target.provider}/${target.modelId}. Keeping the current model for ${reason}.`,
+          "warning",
+        );
+      }
+      return false;
+    }
+
+    if (notifyOnSuccess && ctx.hasUI) {
+      const anthropicHint = requiresAnthropicSafety(target)
+        ? " If Anthropic rejects inherited tool history, start a fresh branch/session before continuing."
+        : "";
+      ctx.ui.notify(`Model switched to ${target.provider}/${target.modelId} for ${reason}.${anthropicHint}`, "info");
+    }
+    return true;
+  }
+
+  async function applyModeDefaultModel(mode: Mode, ctx: ExtensionContext): Promise<void> {
+    const pair = MODE_MODEL_PAIRS[mode];
+    if (!pair) return;
+    await switchToModelTarget(pair.primary, ctx, `${mode} mode`);
+  }
+
+  async function toggleAlternateModelForCurrentMode(ctx: ExtensionContext): Promise<void> {
+    const pair = MODE_MODEL_PAIRS[state.currentMode];
+    if (!pair) {
+      if (ctx.hasUI) {
+        const message = state.currentMode === "creative"
+          ? "Creative mode does not define an alternate model. Use /model."
+          : `Mode ${state.currentMode} does not define an alternate model.`;
+        ctx.ui.notify(message, "info");
+      }
+      return;
+    }
+
+    const target = isCurrentModelTarget(pair.alternate, ctx) ? pair.primary : pair.alternate;
+    await switchToModelTarget(target, ctx, `${state.currentMode} mode`, true);
+  }
+
+  async function applyMode(mode: Mode, ctx: ExtensionContext, notify = true): Promise<void> {
     state.currentMode = mode;
     pi.setActiveTools(getModeTools(baseTools, state.currentMode));
     persistMode(pi, state.currentMode);
     updateStatus(ctx);
-    if (!notify || !ctx.hasUI) return;
-    const descriptor = getModeDescriptor(state.currentMode);
-    ctx.ui.notify(descriptor.notification(state.activeProject), "info");
+    if (notify && ctx.hasUI) {
+      const descriptor = getModeDescriptor(state.currentMode);
+      ctx.ui.notify(descriptor.notification(state.activeProject), "info");
+    }
+    await applyModeDefaultModel(mode, ctx);
   }
 
   // ─── Approval action context ──────────────────────────────────────────────────
@@ -205,12 +426,20 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         const choice = await ctx.ui.select(`Review the proposal in the transcript, then choose an action for ${formatProposalMenuLabel(proposal)}.`, ["Approve", "Revise", "Defer"]);
         if (!choice) return;
         state.approvalPromptDeferred = false;
-        if (choice === "Approve") { const message = approveSelectedProposals(approvalDeps, ctx, [proposal.id]); state.approvalResumePending = true; ctx.ui.notify(message, "success"); dispatchApprovalDecision(ctx, message); return; }
+        if (choice === "Approve") {
+          const message = approveSelectedProposals(approvalDeps, ctx, [proposal.id]);
+          state.approvalResumePending = true;
+          ctx.ui.notify(message, "success");
+          dispatchApprovalDecision(ctx, message);
+          return;
+        }
         if (choice === "Defer") { const note = await ctx.ui.input("Defer note", "Why should this proposal be deferred?"); const message = deferSelectedProposals(approvalDeps, ctx, [proposal.id], note); ctx.ui.notify(message, "info"); dispatchApprovalDecision(ctx, message); return; }
         const note = await ctx.ui.input("Revision request", "What should change before approval?");
         const message = requestSelectedProposalRevision(approvalDeps, ctx, [proposal.id], note);
         ctx.ui.notify(message, "info"); dispatchApprovalDecision(ctx, message); return;
       }
+    } catch (error) {
+      ctx.ui.notify(`Approval prompt failed: ${formatErrorDetails(error)}`, "warning");
     } finally { state.approvalPromptInFlight = false; }
   }
 
@@ -222,30 +451,29 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     updateStatus(ctx);
     if (!notify || !ctx.hasUI) return;
     if (!project) { ctx.ui.notify("No project loaded for this session.", "info"); return; }
-    ctx.ui.notify(`Loaded project: ${project.name}`, "info");
+    ctx.ui.notify(`Loaded project: (${project.id}) ${project.name}`, "info");
   }
 
   async function selectProject(ctx: ExtensionContext, promptTitle = "Select project for this session"): Promise<void> {
     const projects = await loadProjects();
-    if (projects.length === 0) { if (ctx.hasUI) ctx.ui.notify(`No projects found under ${getProjectsRoot()}`, "warning"); await setActiveProject(null, ctx, false); return; }
     state.activeRepoRoot = await getGitRoot(ctx.cwd);
-    const sorted = [...projects].sort((a, b) => {
-      const aMatch = matchesRepo(a, state.activeRepoRoot);
-      const bMatch = matchesRepo(b, state.activeRepoRoot);
-      if (aMatch !== bMatch) return aMatch ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-    const options = sorted.map((p) => {
-      const matchLabel = matchesRepo(p, state.activeRepoRoot) ? "[repo] " : "";
-      const desc = p.description ? ` — ${p.description}` : "";
-      return `${matchLabel}${p.name} (${p.id})${desc}`;
-    });
-    options.push("No project");
-    if (!ctx.hasUI) { await setActiveProject(sorted[0] ?? null, ctx, false); return; }
+    const repoProjects = projects
+      .filter((p) => matchesRepo(p, state.activeRepoRoot))
+      .sort((a, b) => a.id.localeCompare(b.id));
+
+    const NEW_PROJECT = "+ New project…";
+    const NO_PROJECT = "No project";
+
+    const options = repoProjects.map((p) => `(${p.id}) ${p.name}`);
+    options.push(NEW_PROJECT, NO_PROJECT);
+
+    if (!ctx.hasUI) { await setActiveProject(repoProjects[0] ?? null, ctx, false); return; }
+
     const choice = await ctx.ui.select(promptTitle, options);
-    if (!choice || choice === "No project") { await setActiveProject(null, ctx); return; }
+    if (choice === NEW_PROJECT) { await commandHandlers["new-project"]("", ctx); return; }
+    if (!choice || choice === NO_PROJECT) { await setActiveProject(null, ctx); return; }
     const index = options.indexOf(choice);
-    await setActiveProject(sorted[index] ?? null, ctx);
+    await setActiveProject(repoProjects[index] ?? null, ctx);
   }
 
   // ─── Command handler implementations ─────────────────────────────────────────
@@ -263,30 +491,23 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       const existingProjects = await loadProjects();
       if (existingProjects.some((p) => p.id === projectId)) { ctx.ui.notify(`Project already exists: ${projectId}`, "warning"); return; }
       const defaultName = titleizeProjectId(projectId);
-      const projectName = ((await ctx.ui.input("Project name", `Human-readable project name [${defaultName}]`)) ?? "").trim() || defaultName;
-      const description = ((await ctx.ui.input("Description", "Short description shown in the project picker")) ?? "").trim();
-      const goal = ((await ctx.ui.input("Goal", "One-sentence definition of success")) ?? "").trim();
-      const owner = ((await ctx.ui.input("Owner", "Project owner")) ?? "").trim();
+      const projectName = ((await ctx.ui.input("Project title", `Human-readable project title [${defaultName}]`)) ?? "").trim() || defaultName;
+      const description = ((await ctx.ui.input("Description", "Describe this project in detail — the AI will use this to populate the state file")) ?? "").trim();
       const defaultRepo = state.activeRepoRoot || getResolutionBase(ctx.cwd, state.activeRepoRoot);
       const primaryRepoInput = ((await ctx.ui.input("Primary repo", `Primary repository path [${defaultRepo}]`)) ?? "").trim();
       const primaryRepo = resolveFrom(ctx.cwd, normalizeInputPath(primaryRepoInput || defaultRepo), state.activeRepoRoot);
       const additionalReposInput = ((await ctx.ui.input("Additional repos", "Additional repository paths, one per line or comma-separated")) ?? "").trim();
-      const currentFocusInput = ((await ctx.ui.input("Current focus", "Initial focus items, one per line or comma-separated")) ?? "").trim();
-      const constraintsInput = ((await ctx.ui.input("Constraints", "Important constraints, one per line or comma-separated")) ?? "").trim();
-      const assumptionsInput = ((await ctx.ui.input("Assumptions", "Important assumptions, one per line or comma-separated")) ?? "").trim();
-      const nextStepsInput = ((await ctx.ui.input("Next steps", "Immediate next steps, one per line or comma-separated")) ?? "").trim();
-      const tagsInput = ((await ctx.ui.input("Tags", "Optional tags, one per line or comma-separated")) ?? "").trim();
       const repoPaths = [primaryRepo, ...parseMultilineList(additionalReposInput).map((p) => resolveFrom(ctx.cwd, normalizeInputPath(p), state.activeRepoRoot))].filter((p) => p.length > 0).filter((p, i, v) => v.indexOf(p) === i);
       const project: NewProjectWizardResult = {
-        id: projectId, name: projectName, description: description || undefined, goal: goal || undefined, owner: owner || undefined,
+        id: projectId,
+        name: projectName,
+        description: description || undefined,
         repos: repoPaths.map((p, i) => ({ path: p, name: inferRepoName(p), role: i === 0 ? "primary" : "supporting" })),
-        currentFocus: parseMultilineList(currentFocusInput), constraints: parseMultilineList(constraintsInput),
-        assumptions: parseMultilineList(assumptionsInput), nextSteps: parseMultilineList(nextStepsInput), tags: parseMultilineList(tagsInput),
       };
       try {
         const created = await createProjectScaffold(project);
         await setActiveProject(created, ctx, false);
-        const lines = [`Created project: ${created.name} (${created.id})`, `State: ${getProjectStatePath(created)}`, `Artifacts: ${getProjectArtifactsPath(created)}`, "The new project is now active for this session."];
+        const lines = [`Created project: (${created.id}) ${created.name}`, `State: ${getProjectStatePath(created)}`, `Artifacts: ${getProjectArtifactsPath(created)}`, "The new project is now active for this session."];
         if (created.repos.some((r) => !isRepoPathVisibleInSession(r.path, state.activeRepoRoot))) lines.push("Restart cogi to mount any newly linked repositories into the sandbox.");
         ctx.ui.notify(lines.join("\n"), "success");
       } catch (error) { ctx.ui.notify(`Failed to create project: ${String(error)}`, "warning"); }
@@ -295,7 +516,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     "project-status": async (_args, ctx) => {
       const lines = [`Mode: ${state.currentMode}`, `Control root: ${getControlRoot()}`];
       if (state.activeRepoRoot) lines.push(`Repo root: ${state.activeRepoRoot}`);
-      if (state.activeProject) { lines.push(`Project: ${state.activeProject.name} (${state.activeProject.id})`); lines.push(`State: ${getProjectStatePath(state.activeProject)}`); lines.push(`Artifacts: ${getProjectArtifactsPath(state.activeProject)}`); }
+      if (state.activeProject) { lines.push(`Project: (${state.activeProject.id}) ${state.activeProject.name}`); lines.push(`State: ${getProjectStatePath(state.activeProject)}`); lines.push(`Artifacts: ${getProjectArtifactsPath(state.activeProject)}`); }
       else { lines.push("Project: none"); }
       const needingApproval = getPendingApprovalProposals(approvalDeps);
       if (needingApproval.length > 0) { lines.push(`Pending approvals: ${needingApproval.length}`); for (const p of needingApproval) lines.push(`- Change ${p.index}/${p.total}: ${p.file} — ${p.proposedEdit} [${p.status}]`); }
@@ -311,11 +532,11 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       if (state.activeProject.repos.some((r) => resolve(r.path) === resolvedRepoPath)) { if (ctx.hasUI) ctx.ui.notify(`Repo already linked to this project: ${resolvedRepoPath}`, "info"); return; }
       const updatedProject: ProjectRecord = { ...state.activeProject, repos: [...state.activeProject.repos, { path: resolvedRepoPath }] };
       const projectJsonPath = resolve(state.activeProject.dir, "project.json");
-      let projectJson: Record<string, unknown> = { id: updatedProject.id, name: updatedProject.name, description: updatedProject.description, stateFile: updatedProject.stateFile, artifactsDir: updatedProject.artifactsDir, repos: updatedProject.repos, repoContexts: updatedProject.repoContexts, tags: updatedProject.tags };
+      let projectJson: Record<string, unknown> = { id: updatedProject.id, name: updatedProject.name, stateFile: updatedProject.stateFile, artifactsDir: updatedProject.artifactsDir, repos: updatedProject.repos, repoContexts: updatedProject.repoContexts };
       try { const parsed = JSON.parse(await readFile(projectJsonPath, "utf8")) as Record<string, unknown>; if (parsed && typeof parsed === "object") projectJson = { ...parsed, repos: updatedProject.repos }; } catch { /* rebuild */ }
       await writeFile(projectJsonPath, `${JSON.stringify(projectJson, null, 2)}\n`, "utf8");
       await setActiveProject(updatedProject, ctx, false);
-      if (ctx.hasUI) ctx.ui.notify([`Added linked repo to ${updatedProject.name}: ${resolvedRepoPath}`, "Restart cogi to mount the new repository into the sandbox."].join("\n"), "success");
+      if (ctx.hasUI) ctx.ui.notify([`Added linked repo to (${updatedProject.id}) ${updatedProject.name}: ${resolvedRepoPath}`, "Restart cogi to mount the new repository into the sandbox."].join("\n"), "success");
     },
 
     "weekly-summary": async (_args, ctx) => {
@@ -329,8 +550,8 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       if (nextWeekItems.length < 10) nextWeekItems.push(...collectTopWeeklySummaryItems(states, "nextSteps", 10 - nextWeekItems.length, seen));
       const artifactsPath = getProjectArtifactsPath(state.activeProject);
       const artifactPath = resolve(artifactsPath, formatWeeklySummaryFilename(now));
-      const sourceLines = states.length > 0 ? states.map((s: WeeklySummaryState) => `- ${s.project.name}: ${s.statePath} (updated ${formatShutdownTimestamp(s.modifiedAt)})`).join("\n") : "- none";
-      const artifactContent = ["# Weekly Summary", "", `- generated_at: ${formatShutdownTimestamp(now)}`, `- window_start: ${formatWeeklySummaryDate(since)}`, `- window_end: ${formatWeeklySummaryDate(now)}`, `- active_project: ${state.activeProject.name} (${state.activeProject.id})`, `- scanned_state_files: ${states.length}`, "", "## Top Completed This Week", formatWeeklySummaryBullets(completedItems, "No completed items were found in project state files updated during the last 7 days."), "", "## Top In Progress For Next Week", formatWeeklySummaryBullets(nextWeekItems, "No in-progress or next-step items were found in project state files updated during the last 7 days."), "", "## Source State Files", sourceLines, ""].join("\n");
+      const sourceLines = states.length > 0 ? states.map((s: WeeklySummaryState) => `- (${s.project.id}) ${s.project.name}: ${s.statePath} (updated ${formatShutdownTimestamp(s.modifiedAt)})`).join("\n") : "- none";
+      const artifactContent = ["# Weekly Summary", "", `- generated_at: ${formatShutdownTimestamp(now)}`, `- window_start: ${formatWeeklySummaryDate(since)}`, `- window_end: ${formatWeeklySummaryDate(now)}`, `- active_project: (${state.activeProject.id}) ${state.activeProject.name}`, `- scanned_state_files: ${states.length}`, "", "## Top Completed This Week", formatWeeklySummaryBullets(completedItems, "No completed items were found in project state files updated during the last 7 days."), "", "## Top In Progress For Next Week", formatWeeklySummaryBullets(nextWeekItems, "No in-progress or next-step items were found in project state files updated during the last 7 days."), "", "## Source State Files", sourceLines, ""].join("\n");
       await mkdir(artifactsPath, { recursive: true });
       await writeFile(artifactPath, artifactContent, "utf8");
       if (ctx.hasUI) ctx.ui.notify([`Weekly summary written: ${artifactPath}`, `Completed items: ${completedItems.length}`, `Next-week items: ${nextWeekItems.length}`, `Scanned state files: ${states.length}`].join("\n"), "success");
@@ -355,6 +576,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       const selectors = rawSelectors ? parseSelectorList(rawSelectors) : [];
       const message = selectors.length > 0 ? rejectSelectedProposals(approvalDeps, ctx, selectors) : rejectPendingProposals(approvalDeps, ctx);
       if (ctx.hasUI) ctx.ui.notify(message, message.startsWith("Rejected ") ? "success" : "info");
+      dispatchApprovalDecision(ctx, message);
     },
 
     defer: async (args, ctx) => {
@@ -367,6 +589,8 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     normal: async (_args, ctx) => applyMode("normal", ctx),
     readonly: async (_args, ctx) => applyMode(state.currentMode === "readonly" ? "normal" : "readonly", ctx),
     plan: async (_args, ctx) => applyMode(state.currentMode === "plan" ? "normal" : "plan", ctx),
+    creative: async (_args, ctx) => applyMode("creative", ctx),
+    "alt-model": async (_args, ctx) => toggleAlternateModelForCurrentMode(ctx),
   };
 
   const shortcutHandlers: ShortcutHandlers = {
@@ -387,16 +611,15 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       baseTools = Array.from(new Set(pi.getAllTools().map((t) => t.name)));
       state.activeRepoRoot = await getGitRoot(ctx.cwd);
       const restoredMode = restoreMode(ctx);
-      state.currentMode = restoredMode === "readonly" ? "readonly" : "plan";
+      state.currentMode = getRestoredStartupMode(restoredMode);
       state.pendingProposals = restoreNormalizedProposals(ctx, ctx.cwd, state.activeRepoRoot);
       const preferredProjectId = restoreStoredProjectId(ctx) ?? process.env.COGITATOR_PROJECT_ID;
-      const projects = await loadProjects();
       if (typeof preferredProjectId === "string") {
+        const projects = await loadProjects();
         state.activeProject = projects.find((p) => p.id === preferredProjectId) ?? null;
-        if (state.activeProject) { persistProjectSelection(pi, state.activeProject.id); }
-        else if (ctx.hasUI) { ctx.ui.notify(`Stored project '${preferredProjectId}' was not found in ${getProjectsRoot()}`, "warning"); }
-      } else if (preferredProjectId === null) { state.activeProject = null; }
-      else if (ctx.hasUI) { await selectProject(ctx); }
+        if (state.activeProject) persistProjectSelection(pi, state.activeProject.id);
+      }
+      if (ctx.hasUI && !state.activeProject) { await selectProject(ctx); }
       pi.setActiveTools(getModeTools(baseTools, state.currentMode));
       updateStatus(ctx);
     },
@@ -405,7 +628,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       baseTools = Array.from(new Set(pi.getAllTools().map((t) => t.name)));
       state.activeRepoRoot = await getGitRoot(ctx.cwd);
       const restoredMode = restoreMode(ctx);
-      state.currentMode = restoredMode === "readonly" ? "readonly" : "plan";
+      state.currentMode = getRestoredTreeMode(restoredMode);
       state.pendingProposals = restoreNormalizedProposals(ctx, ctx.cwd, state.activeRepoRoot);
       const restoredProjectId = restoreStoredProjectId(ctx);
       if (restoredProjectId === null) { state.activeProject = null; }
@@ -431,6 +654,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     input: async (event, ctx) => {
       const raw = event.text.trim();
       const lower = raw.toLowerCase();
+      state.proposalOnlyRequested = /(do not apply( it)? yet|don't apply( it)? yet|proposal-only|proposal only)/i.test(raw);
       if (raw === "r" || lower === "reject") { state.approvalPromptDeferred = false; return { action: "transform" as const, text: rejectPendingProposals(approvalDeps, ctx) }; }
       const rejectMatch = raw.match(/^(r|reject)\s+(.+)$/i);
       if (rejectMatch) { state.approvalPromptDeferred = false; return { action: "transform" as const, text: rejectSelectedProposals(approvalDeps, ctx, parseSelectorList(rejectMatch[2])) }; }
@@ -456,7 +680,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     },
 
     before_agent_start: async (event) => {
-      const additions: string[] = [await readPromptFragment(CHANGE_PROPOSAL_WORKFLOW_PROMPT_PATH), await readPromptFragment(SECRET_SAFETY_PROMPT_PATH)];
+      const additions: string[] = [await readPromptFragment(CHANGE_PROPOSAL_WORKFLOW_PROMPT_PATH), await readPromptFragment(SECRET_SAFETY_PROMPT_PATH), await readPromptFragment(TARGETED_FILE_ACCESS_PROMPT_PATH)];
       const modeDescriptor = getModeDescriptor(state.currentMode);
       additions.push(await readPromptFragment(modeDescriptor.promptPath));
       if (modeDescriptor.writePolicy.projectScopeOnly && state.activeProject) {
@@ -470,82 +694,171 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     },
 
     agent_end: async (event, ctx) => {
-      const assistantText = extractAssistantText(event.messages as unknown[]);
-      const markResult = markCompletedProposals(ps(), assistantText);
-      const completedCount = markResult.count;
-      if (completedCount > 0) { state.pendingProposals = markResult.proposals; }
-      const proposals = extractPendingProposals(assistantText, ctx.cwd, state.activeRepoRoot);
-      let stateChanged = completedCount > 0;
-      if (completedCount > 0 && ctx.hasUI) ctx.ui.notify(`Marked ${completedCount} approved or applying proposal(s) complete.`, "success");
-      if (proposals.length > 0) {
-        state.pendingProposals = mergePendingProposals(ps(), proposals.map((p) => ({ ...p, status: "pending" as const })));
-        state.approvalPromptDeferred = false; stateChanged = true;
+      try {
+        const assistantText = extractAssistantText(event.messages as unknown[]);
+        const markResult = markCompletedProposals(ps(), assistantText);
+        const completedCount = markResult.count;
+        if (completedCount > 0) { state.pendingProposals = markResult.proposals; }
+        const proposals = extractPendingProposals(assistantText, ctx.cwd, state.activeRepoRoot);
+        let stateChanged = completedCount > 0;
+        if (completedCount > 0 && ctx.hasUI) ctx.ui.notify(`Marked ${completedCount} approved or applying proposal(s) complete.`, "success");
+        if (proposals.length > 0) {
+          state.pendingProposals = mergePendingProposals(ps(), proposals.map((p) => ({ ...p, status: "pending" as const })));
+          state.approvalPromptDeferred = false; stateChanged = true;
+        }
+        if (stateChanged) { persistApprovalState(); updateStatus(ctx); }
+        const actionableCount = getPendingApprovalProposals(approvalDeps).length;
+        if (proposals.length > 0 && ctx.hasUI) {
+          const actionableMessage = actionableCount > 0 ? `${actionableCount} actionable step(s) can be reviewed now.` : "No step is actionable yet; complete earlier approved steps first.";
+          ctx.ui.notify(`Captured ${proposals.length} proposed change(s). ${actionableMessage}`, "info");
+        }
+        const shouldPromptForApproval = !state.proposalOnlyRequested && ctx.hasUI && !state.approvalPromptDeferred && actionableCount > 0 && (proposals.length > 0 || completedCount > 0);
+        state.proposalOnlyRequested = false;
+        if (shouldPromptForApproval) await promptForApproval(ctx);
+      } catch (error) {
+        if (ctx.hasUI) ctx.ui.notify(`Approval lifecycle handling failed after the turn: ${formatErrorDetails(error)}`, "warning");
       }
-      if (stateChanged) { persistApprovalState(); updateStatus(ctx); }
-      const actionableCount = getPendingApprovalProposals(approvalDeps).length;
-      if (proposals.length > 0 && ctx.hasUI) {
-        const actionableMessage = actionableCount > 0 ? `${actionableCount} actionable step(s) can be reviewed now.` : "No step is actionable yet; complete earlier approved steps first.";
-        ctx.ui.notify(`Captured ${proposals.length} proposed change(s). ${actionableMessage}`, "info");
-      }
-      if (ctx.hasUI && !state.approvalPromptDeferred && actionableCount > 0 && (proposals.length > 0 || completedCount > 0)) await promptForApproval(ctx);
     },
 
     tool_call: async (event, ctx) => {
-      if (event.toolName === "bash") {
-        const command = String(event.input.command ?? "");
-        if (/\bsops\b/i.test(command)) return { block: true, reason: "Access to the sops command is blocked." };
-        if (commandTouchesProtectedPath(command, protectedPaths)) return { block: true, reason: "Access to protected secret paths is blocked." };
-      }
-      const toolInputPath = getToolInputPath(event as { toolName: string; input: Record<string, unknown> });
-      if (toolInputPath) {
-        const resolvedToolPath = resolveFrom(ctx.cwd, normalizeInputPath(toolInputPath), state.activeRepoRoot);
-        if (pathTouchesProtectedPath(resolvedToolPath, protectedPaths)) return { block: true, reason: "Access to protected secret paths is blocked." };
-      }
-      const toolDescriptor = getModeDescriptor(state.currentMode);
-      const isMutationTool = event.toolName === "write" || event.toolName === "edit";
+      try {
+        if (event.toolName === "bash") {
+          const command = String(event.input.command ?? "");
+          if (/\bsops\b/i.test(command)) return { block: true, reason: "Access to the sops command is blocked." };
+          if (commandTouchesProtectedPath(command, protectedPaths)) return { block: true, reason: "Access to protected secret paths is blocked." };
+        }
+        const toolInputPath = getToolInputPath(event as { toolName: string; input: Record<string, unknown> });
+        if (toolInputPath) {
+          const resolvedToolPath = resolveFrom(ctx.cwd, normalizeInputPath(toolInputPath), state.activeRepoRoot);
+          if (pathTouchesProtectedPath(resolvedToolPath, protectedPaths)) return { block: true, reason: "Access to protected secret paths is blocked." };
+        }
+        const toolDescriptor = getModeDescriptor(state.currentMode);
+        const isMutationTool = event.toolName === "write" || event.toolName === "edit";
+        const requestedPath = typeof event.input.path === "string" ? event.input.path : "";
+        const resolvedPath = requestedPath ? resolveFrom(ctx.cwd, normalizeInputPath(requestedPath), state.activeRepoRoot) : "";
 
-      // blocked modes: block ALL bash and ALL mutations (readonly)
-      if (toolDescriptor.writePolicy.blocked) {
-        if (event.toolName === "bash") return { block: true, reason: "Read-only mode blocks bash. Use /plan or /normal." };
-        if (isMutationTool) return { block: true, reason: "Read-only mode blocks file mutations. Use /plan or /normal." };
-        return;
-      }
+        // blocked modes: block ALL bash and ALL mutations (readonly)
+        if (toolDescriptor.writePolicy.blocked) {
+          if (event.toolName === "bash") return { block: true, reason: "Read-only mode blocks bash. Use /plan or /normal." };
+          if (isMutationTool) return { block: true, reason: "Read-only mode blocks file mutations. Use /plan or /normal." };
+          return;
+        }
 
-      // safe-bash modes: only allow safe read-only bash (plan)
-      if (event.toolName === "bash" && toolDescriptor.requiresSafeBash) {
-        const command = String(event.input.command ?? "");
-        if (!isSafeCommand(command)) return { block: true, reason: `Plan mode only allows safe read-only bash commands. Use /normal for mutating commands.\nCommand: ${command}` };
-        return;
-      }
+        if (event.toolName === "bash" && isBroadInspectionBash(String(event.input.command ?? ""))) {
+          return {
+            block: true,
+            reason: "Use structured tools instead of broad shell inspection. Do not use bash rg/grep -R/find for repo search. Use grep/find directly with a narrowing glob and reasonable limit, then read only the relevant file section.",
+          };
+        }
 
-      // unrestricted modes: approval gate only (normal)
-      if (toolDescriptor.writePolicy.unrestricted) {
-        if (isMutationTool) {
-          const requestedPath = String(event.input.path ?? "");
-          const resolvedPath = resolveFrom(ctx.cwd, normalizeInputPath(requestedPath), state.activeRepoRoot);
+        if (event.toolName === "read" && requestedPath) {
+          const readPolicy = getReadAccessPolicy(state.currentMode);
+          const refreshExempt = isRefreshExemptReadPath(requestedPath, ctx);
+          const requestedLimit = getRequestedReadLimit(event.input);
+          if (requestedLimit !== undefined && requestedLimit > readPolicy.maxDirectReadLines) {
+            return {
+              block: true,
+              reason: `This read requests ${requestedLimit} lines, which is too broad for direct reading. Use read with offset and limit, keeping limit at or below ${readPolicy.maxDirectReadLines} lines.`,
+            };
+          }
+          if (isWindowedReadRequest(event.input)) {
+            const requestedWindow = getRequestedReadWindow(event.input);
+            const sweepThreshold = Math.max(readPolicy.maxDirectReadLines * 2, readPolicy.requireWindowedReadAboveLines * 2);
+            if (!refreshExempt && requestedWindow && hasRepeatedIdenticalTopWindowRead(requestedPath, requestedWindow, ctx)) {
+              return {
+                block: true,
+                reason: "This file section was already read in the current session. Reuse what you already learned, or request a different narrower window if you need another part of the file.",
+              };
+            }
+            if (!refreshExempt && requestedWindow && wouldBecomeWindowedSweep(requestedPath, requestedWindow, ctx, sweepThreshold)) {
+              return {
+                block: true,
+                reason: "This sequence of adjacent windowed reads is turning into an effective whole-file sweep. Search first to narrow the relevant section, then read only the matching region with offset and limit.",
+              };
+            }
+            if (requestedWindow) recordWindowedRead(requestedPath, requestedWindow, ctx);
+            return;
+          }
+          if (!refreshExempt && readPolicy.blockRepeatedFullReads && hasRepeatedFullReread(requestedPath, ctx)) {
+            return {
+              block: true,
+              reason: "This file was already fully read in the current session. Reuse what you already learned, or request a narrower read with offset/limit if you need a specific section.",
+            };
+          }
+          recordFullRead(requestedPath, ctx);
+          return;
+        }
+
+        if ((event.toolName === "grep" || event.toolName === "find")) {
+          const broadSearch = isBroadSearchPath(event.input.path, ctx.cwd, state.activeRepoRoot);
+          const requestedLimit = getRequestedSearchLimit(event.input);
+          if (requiresSearchGlob(event.input, ctx.cwd, state.activeRepoRoot, state.currentMode, event.toolName === "find" ? "find" : "grep")) {
+            return {
+              block: true,
+              reason: "Broad repo-wide search requires a glob. Add a glob such as extensions/**/*.ts or resources/**/*.md to narrow the search before reading files.",
+            };
+          }
+          if (broadSearch && requestedLimit === undefined) {
+            return {
+              block: true,
+              reason: "Broad repo-wide search requires an explicit limit. Add a reasonable limit so the search stays targeted.",
+            };
+          }
+          if (!hasReasonableSearchLimit(event.input, state.currentMode)) {
+            return {
+              block: true,
+              reason: "This search limit is too high. Use a smaller, targeted limit before expanding the search further.",
+            };
+          }
+          if (event.toolName === "find") {
+            const pattern = typeof event.input.pattern === "string" ? event.input.pattern.trim() : "";
+            if (!pattern) return { block: true, reason: "find requires a pattern. Use a targeted glob such as extensions/**/*.ts or **/*.spec.ts." };
+            if (broadSearch && /^(?:\*\*\/)?\*$/.test(pattern)) {
+              return {
+                block: true,
+                reason: "This find pattern is too broad for a repo-wide search. Use a narrower pattern such as extensions/**/*.ts and include a reasonable limit.",
+              };
+            }
+          }
+          return;
+        }
+
+        // safe-bash modes: only allow safe read-only bash (plan)
+        if (event.toolName === "bash" && toolDescriptor.requiresSafeBash) {
+          const command = String(event.input.command ?? "");
+          if (!isSafeCommand(command)) return { block: true, reason: `Plan mode only allows safe read-only bash commands. Use /normal for mutating commands.\nCommand: ${command}` };
+          return;
+        }
+
+        // unrestricted modes: approval gate only (normal)
+        if (toolDescriptor.writePolicy.unrestricted) {
+          if (isMutationTool) {
+            if (!isApprovalExemptPath(resolvedPath, state.activeProject)) {
+              const approvedProposal = beginApplyingProposalForPath(approvalDeps, resolvedPath, ctx);
+              if (!approvedProposal) return { block: true, reason: buildApprovalBlockedReason(resolvedPath, ps(), getResolutionBase(ctx.cwd, state.activeRepoRoot), { toolName: event.toolName, mutationSummary: describeMutation(event as { toolName: string; input: Record<string, unknown> }) }) };
+            }
+          }
+          return;
+        }
+
+        // project-scope modes: scope gate + approval gate (plan)
+        if (toolDescriptor.writePolicy.projectScopeOnly) {
+          if (!isMutationTool) return;
+          if (!state.activeProject) return { block: true, reason: "Plan mode requires an active project before state or artifact files may be edited. Use /project first." };
+          const statePath = getProjectStatePath(state.activeProject);
+          const artifactsPath = getProjectArtifactsPath(state.activeProject);
+          const jiraAllowed = resolvedPath.startsWith(JIRA_TMP_PREFIX) && resolvedPath.endsWith(".txt");
+          const allowed = resolvedPath === statePath || isSameOrWithin(resolvedPath, artifactsPath) || jiraAllowed;
+          if (!allowed) return { block: true, reason: ["Plan mode only allows file mutations for the active project control files.", `Active project state file: ${statePath}`, `Active project artifacts directory: ${artifactsPath}`, `Allowed Jira draft path pattern: ${JIRA_TMP_PREFIX}<ISSUE-KEY>.txt`, `Requested path: ${resolvedPath}`, "Use /normal to edit repository files."].join("\n") };
           if (!isApprovalExemptPath(resolvedPath, state.activeProject)) {
             const approvedProposal = beginApplyingProposalForPath(approvalDeps, resolvedPath, ctx);
             if (!approvedProposal) return { block: true, reason: buildApprovalBlockedReason(resolvedPath, ps(), getResolutionBase(ctx.cwd, state.activeRepoRoot), { toolName: event.toolName, mutationSummary: describeMutation(event as { toolName: string; input: Record<string, unknown> }) }) };
           }
         }
-        return;
-      }
-
-      // project-scope modes: scope gate + approval gate (plan)
-      if (toolDescriptor.writePolicy.projectScopeOnly) {
-        if (!isMutationTool) return;
-        if (!state.activeProject) return { block: true, reason: "Plan mode requires an active project before state or artifact files may be edited. Use /project first." };
-        const requestedPath = String(event.input.path ?? "");
-        const resolvedPath = resolveFrom(ctx.cwd, normalizeInputPath(requestedPath), state.activeRepoRoot);
-        const statePath = getProjectStatePath(state.activeProject);
-        const artifactsPath = getProjectArtifactsPath(state.activeProject);
-        const jiraAllowed = resolvedPath.startsWith(JIRA_TMP_PREFIX) && resolvedPath.endsWith(".txt");
-        const allowed = resolvedPath === statePath || isSameOrWithin(resolvedPath, artifactsPath) || jiraAllowed;
-        if (!allowed) return { block: true, reason: ["Plan mode only allows file mutations for the active project control files.", `Active project state file: ${statePath}`, `Active project artifacts directory: ${artifactsPath}`, `Allowed Jira draft path pattern: ${JIRA_TMP_PREFIX}<ISSUE-KEY>.txt`, `Requested path: ${resolvedPath}`, "Use /normal to edit repository files."].join("\n") };
-        if (!isApprovalExemptPath(resolvedPath, state.activeProject)) {
-          const approvedProposal = beginApplyingProposalForPath(approvalDeps, resolvedPath, ctx);
-          if (!approvedProposal) return { block: true, reason: buildApprovalBlockedReason(resolvedPath, ps(), getResolutionBase(ctx.cwd, state.activeRepoRoot), { toolName: event.toolName, mutationSummary: describeMutation(event as { toolName: string; input: Record<string, unknown> }) }) };
-        }
+      } catch (error) {
+        const detail = formatErrorDetails(error);
+        if (ctx.hasUI) ctx.ui.notify(`Approval gate failed during ${event.toolName}: ${detail}`, "warning");
+        return { block: true, reason: `Approval gate internal error while processing ${event.toolName}.\n${detail}` };
       }
     },
   };

@@ -28,27 +28,18 @@ export interface ProjectRepoLink {
 export interface ProjectRecord {
   id: string;
   name: string;
-  description?: string;
   dir: string;
   stateFile: string;
   artifactsDir: string;
   repos: ProjectRepoLink[];
   repoContexts: string[];
-  tags: string[];
 }
 
 export interface NewProjectWizardResult {
   id: string;
   name: string;
   description?: string;
-  goal?: string;
-  owner?: string;
   repos: ProjectRepoLink[];
-  currentFocus: string[];
-  constraints: string[];
-  assumptions: string[];
-  nextSteps: string[];
-  tags: string[];
 }
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
@@ -249,13 +240,11 @@ export async function loadProjects(): Promise<ProjectRecord[]> {
       const raw = JSON.parse(await readFile(jsonPath, "utf8")) as {
         id?: unknown;
         name?: unknown;
-        description?: unknown;
         stateFile?: unknown;
         artifactsDir?: unknown;
         repos?: unknown;
         repoContexts?: unknown;
         contextFiles?: unknown;
-        tags?: unknown;
       };
 
       const id = typeof raw.id === "string" && raw.id.length > 0 ? raw.id : entry.name;
@@ -265,56 +254,53 @@ export async function loadProjects(): Promise<ProjectRecord[]> {
       projects.push({
         id,
         name,
-        description: typeof raw.description === "string" ? raw.description : undefined,
         dir,
         stateFile: typeof raw.stateFile === "string" ? raw.stateFile : STATE_FILE_DEFAULT,
         artifactsDir: typeof raw.artifactsDir === "string" ? raw.artifactsDir : ARTIFACTS_DIR_DEFAULT,
         repos: parseRepoLinks(raw.repos),
         repoContexts,
-        tags: parseStringArray(raw.tags),
       });
     } catch {
       // Ignore malformed project definitions; one bad project.json must not break startup.
     }
   }
 
-  return projects.sort((a, b) => a.name.localeCompare(b.name));
+  return projects.sort((a, b) => a.id.localeCompare(b.id));
 }
 
 // ─── Project scaffolding ────────────────────────────────────────────────────────
 
 export async function buildInitialStateMarkdown(project: NewProjectWizardResult): Promise<string> {
   const today = new Date().toISOString().slice(0, 10);
-  const goal = project.goal?.trim() || "TBD";
-  const owner = project.owner?.trim() || "TBD";
-  const nextStepSummary = project.nextSteps[0] ?? "Select this project and refine the initial state.";
   const repoPaths = project.repos.map((repo) => repo.path);
+  const description = project.description?.trim() || "Project description pending.";
+  const nextStepSummary = "Review the project description and flesh out this state file.";
 
   const SHUTDOWN_CHECKPOINT_START = "<!-- COGITATOR:SESSION_SHUTDOWN_CHECKPOINT:START -->";
   const SHUTDOWN_CHECKPOINT_END = "<!-- COGITATOR:SESSION_SHUTDOWN_CHECKPOINT:END -->";
 
   let template = await readFile(SHARED_PROJECT_STATE_TEMPLATE_PATH, "utf8");
-  template = template.replace("# <Project Name>", `# ${project.name}`);
+  template = template.replace("# <Project Name>", `# ${project.name}\n\n## Description\n\n${description}`);
   template = removeMarkdownSection(template, "## Project Metadata");
   template = replaceMarkdownSection(
     template,
     "## Executive Summary",
-    `- Status: todo\n- Goal: ${goal}\n- Updated: ${today}\n- Owner: ${owner}`,
+    `- Status: todo\n- Goal: TBD\n- Updated: ${today}`,
   );
   template = replaceMarkdownSection(
     template,
     "## Background & Context",
-    `- status: todo\n- repo(s):\n${formatStateBulletList(repoPaths, "Add repo path", "  ")}\n- current focus:\n${formatStateBulletList(project.currentFocus, "Capture initial workstreams", "  ")}\n- constraints:\n${formatStateBulletList(project.constraints, "None recorded yet", "  ")}\n- assumptions:\n${formatStateBulletList(project.assumptions, "None recorded yet", "  ")}`,
+    `- status: todo\n- repo(s):\n${formatStateBulletList(repoPaths, "Add repo path", "  ")}\n- current focus:\n${formatStateBulletList([], "Populate from the project description", "  ")}\n- constraints:\n${formatStateBulletList([], "Populate from the project description", "  ")}\n- assumptions:\n${formatStateBulletList([], "Populate from the project description", "  ")}`,
   );
   template = replaceMarkdownSection(
     template,
     "## Architecture Decisions",
-    `- decision: Project scaffold created\n  rationale: Establish a durable project record before substantive work begins.\n  date: ${today}\n  owner: ${owner}\n  status: done`,
+    `- decision: Project scaffold created\n  rationale: Establish a durable project record before substantive work begins.\n  date: ${today}\n  owner: TBD\n  status: done`,
   );
   template = replaceMarkdownSection(
     template,
     "## Implementation Plan",
-    `- [ ] Confirm project scope and success criteria\n- [ ] Review linked repositories and add missing repo context\n- [ ] Start the first concrete implementation or investigation step`,
+    `- [ ] Review the project description and confirm scope\n- [ ] Review linked repositories and add missing repo context\n- [ ] Start the first concrete implementation or investigation step`,
   );
   template = replaceMarkdownSection(
     template,
@@ -334,7 +320,7 @@ export async function buildInitialStateMarkdown(project: NewProjectWizardResult)
   template = replaceMarkdownSection(
     template,
     "## Progress Tracking",
-    `- todo:\n${formatStateBulletList(project.nextSteps, "Pick the first concrete task", "  ")}\n- in_progress:\n  - Project initialization\n- blocked:\n  - None recorded\n- done:\n  - Created initial project scaffold\n- deferred:\n  - None recorded`,
+    `- todo:\n  - Review project description and populate state file sections\n- in_progress:\n  - Project initialization\n- blocked:\n  - None recorded\n- done:\n  - Created initial project scaffold\n- deferred:\n  - None recorded`,
   );
   template = replaceMarkdownSection(template, "## Deferred Approval Items", "- None recorded");
   template = replaceMarkdownSection(
@@ -345,12 +331,12 @@ export async function buildInitialStateMarkdown(project: NewProjectWizardResult)
   template = replaceMarkdownSection(
     template,
     "## Next Steps",
-    formatStateBulletList(project.nextSteps, "Select this project and refine the initial state", ""),
+    "- Review the project description and flesh out this state file",
   );
   template = replaceMarkdownSection(
     template,
     "## Session Shutdown Checkpoint",
-    `This section is system-managed. Do not maintain it manually except when repairing a broken checkpoint block.\n\n${SHUTDOWN_CHECKPOINT_START}\n- saved_at: [none]\n- mode: [none]\n- session_file: [none]\n- repo_root: [none]\n- pending_proposals: 0\n- actionable_approval_steps: 0\n- proposal_status_counts: [none]\n- executive_status: todo\n- goal: ${goal}\n- current_focus: ${project.currentFocus[0] ?? "[none]"}\n- progress_counts: todo=0, in_progress=0, blocked=0, done=0, deferred=0\n- next_steps: ${nextStepSummary}\n- artifact: [none]\n${SHUTDOWN_CHECKPOINT_END}`,
+    `This section is system-managed. Do not maintain it manually except when repairing a broken checkpoint block.\n\n${SHUTDOWN_CHECKPOINT_START}\n- saved_at: [none]\n- mode: [none]\n- session_file: [none]\n- repo_root: [none]\n- pending_proposals: 0\n- actionable_approval_steps: 0\n- proposal_status_counts: [none]\n- executive_status: todo\n- goal: [none]\n- current_focus: [none]\n- progress_counts: todo=0, in_progress=0, blocked=0, done=0, deferred=0\n- next_steps: ${nextStepSummary}\n- artifact: [none]\n${SHUTDOWN_CHECKPOINT_END}`,
   );
 
   return template;
@@ -374,12 +360,10 @@ export async function createProjectScaffold(project: NewProjectWizardResult): Pr
   const projectJson = {
     id: project.id,
     name: project.name,
-    description: project.description,
     stateFile: STATE_FILE_DEFAULT,
     artifactsDir: ARTIFACTS_DIR_DEFAULT,
     repos: project.repos,
     repoContexts: [],
-    tags: project.tags,
   };
 
   await writeFile(projectJsonPath, `${JSON.stringify(projectJson, null, 2)}\n`, "utf8");
@@ -388,13 +372,11 @@ export async function createProjectScaffold(project: NewProjectWizardResult): Pr
   return {
     id: project.id,
     name: project.name,
-    description: project.description,
     dir: projectDir,
     stateFile: STATE_FILE_DEFAULT,
     artifactsDir: ARTIFACTS_DIR_DEFAULT,
     repos: project.repos,
     repoContexts: [],
-    tags: project.tags,
   };
 }
 
@@ -412,17 +394,14 @@ export async function buildProjectContext(
   const resolvedCwd = getResolutionBase(cwd, repoRoot);
 
   sections.push("[COGITATOR PROJECT ACTIVE]");
-  sections.push(`Project: ${project.name}`);
+  sections.push(`Project: (${project.id}) ${project.name}`);
   if (mode) sections.push(`Current Mode: ${mode}`);
-  sections.push(`Project ID: ${project.id}`);
   sections.push(`Project Directory: ${project.dir}`);
   sections.push(`State File: ${statePath}`);
   sections.push(`Artifacts Directory: ${artifactsPath}`);
   sections.push(`Control Root: ${getControlRoot()}`);
   sections.push(`Current Working Directory: ${resolvedCwd}`);
   if (repoRoot) sections.push(`Active Repo Root: ${repoRoot}`);
-
-  if (project.description) sections.push(`Description: ${project.description}`);
 
   if (project.repos.length > 0) {
     sections.push("Linked Repositories:");
@@ -432,38 +411,73 @@ export async function buildProjectContext(
     }
   }
 
-  if (project.tags.length > 0) sections.push(`Tags: ${project.tags.join(", ")}`);
+  const shutdownArtifactPath = resolve(artifactsPath, "latest-shutdown.md");
+
+  // Inline compact state summary — avoids embedding full file contents.
+  // (project-state.ts imports from projects.ts so we cannot import back.)
+  function extractSection(md: string, heading: string): string {
+    const m = md.match(new RegExp(`^## ${heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\n([\\s\\S]*?)(?=^##\\s|$)`, "m"));
+    return m?.[1]?.trim() ?? "";
+  }
+  function bulletValue(section: string, label: string): string {
+    return section.match(new RegExp(`^- ${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*(.*)$`, "m"))?.[1]?.trim() ?? "[none]";
+  }
+  function indentedBullets(section: string, label: string): string[] {
+    const lines = section.split(/\r?\n/);
+    const items: string[] = [];
+    let collecting = false;
+    for (const line of lines) {
+      if (!collecting) { if (line.trim() === `- ${label}:`) collecting = true; continue; }
+      const m = line.match(/^\s{2,}-\s+(.*)$/);
+      if (m) { const v = m[1].trim(); if (v) items.push(v); continue; }
+      if (/^-\s+/.test(line.trim()) || line.trim().length === 0) { if (!m) break; }
+    }
+    return items;
+  }
+  function truncateInline(text: string, max = 200): string {
+    const s = text.replace(/\s+/g, " ").trim();
+    return s.length <= max ? s : `${s.slice(0, max - 1).trimEnd()}\u2026`;
+  }
 
   if (await fileExists(statePath)) {
-    const stateContent = truncate(await readFile(statePath, "utf8"));
-    sections.push("\nProject State:\n```md");
-    sections.push(stateContent);
-    sections.push("```");
+    const stateText = await readFile(statePath, "utf8");
+    const execSec = extractSection(stateText, "Executive Summary");
+    const bgSec = extractSection(stateText, "Background & Context");
+    const progressSec = extractSection(stateText, "Progress Tracking");
+    const nextStepsSec = extractSection(stateText, "Next Steps");
+    const countItems = (label: string) => indentedBullets(progressSec, label).length;
+    const focus = indentedBullets(bgSec, "current focus");
+    const nextSteps = nextStepsSec.split(/\r?\n/).map(l => l.match(/^\s*-\s+(.*)$/)?.[1]?.trim() ?? "").filter(Boolean);
+    const progressCounts = ["todo", "in_progress", "blocked", "done", "deferred"].map(k => `${k}=${countItems(k)}`).join(", ");
+    sections.push([
+      "\nProject State Summary:",
+      `- state_file: ${statePath}`,
+      `- executive_status: ${bulletValue(execSec, "Status")}`,
+      `- goal: ${truncateInline(bulletValue(execSec, "Goal"))}`,
+      `- current_focus: ${focus.length ? truncateInline(focus.join(" | ")) : "[none]"}`,
+      `- progress_counts: ${progressCounts}`,
+      `- next_steps: ${nextSteps.length ? truncateInline(nextSteps.join(" | ")) : "[none]"}`,
+    ].join("\n"));
   } else {
-    sections.push("\nProject State: [missing state file]");
+    sections.push(`\nProject State Summary:\n- state_file: ${statePath}\n- status: [missing state file]`);
   }
 
-  const shutdownArtifactPath = resolve(artifactsPath, "latest-shutdown.md");
-  if (await fileExists(shutdownArtifactPath)) {
-    const shutdownArtifact = truncate(await readFile(shutdownArtifactPath, "utf8"), 12000);
-    sections.push(`\nLatest Shutdown Artifact: ${shutdownArtifactPath}\n\`\`\`md`);
-    sections.push(shutdownArtifact);
-    sections.push("```\n");
-  } else {
-    sections.push(`\nLatest Shutdown Artifact: [missing] ${shutdownArtifactPath}`);
-  }
+  sections.push(`\nLatest Shutdown Artifact: ${await fileExists(shutdownArtifactPath) ? shutdownArtifactPath : `[missing] ${shutdownArtifactPath}`}`);
 
-  for (const relativePath of project.repoContexts) {
-    const absolutePath = resolve(project.dir, relativePath);
-    if (!(await fileExists(absolutePath))) continue;
-    const content = truncate(await readFile(absolutePath, "utf8"), 12000);
-    sections.push(`\nProject Context File: ${absolutePath}\n\`\`\`md`);
-    sections.push(content);
-    sections.push("```\n");
+  if (project.repoContexts.length > 0) {
+    const existingContexts: string[] = [];
+    for (const relativePath of project.repoContexts) {
+      const absolutePath = resolve(project.dir, relativePath);
+      if (await fileExists(absolutePath)) existingContexts.push(absolutePath);
+    }
+    if (existingContexts.length > 0) {
+      sections.push("\nProject Context Files (read these if needed for repo-specific guidance):");
+      for (const p of existingContexts) sections.push(`- ${p}`);
+    }
   }
 
   sections.push(
-    `\nStartup/resume guidance: always review the active project state file (${statePath}) first, then check the rolling shutdown artifact (${shutdownArtifactPath}) for the latest persisted session checkpoint before planning or editing.`,
+    `\nStartup/resume guidance: at session start or resume, review the active project state file (${statePath}) first, then check the rolling shutdown artifact (${shutdownArtifactPath}) for the latest persisted session checkpoint before planning or editing. After that, reuse what you already learned unless those files changed or the task specifically requires refreshed project-tracking context. Do not reread these files on every subsequent task — only reread them when the user explicitly asks for a refresh or when you have reason to believe they changed.`,
   );
 
   sections.push(

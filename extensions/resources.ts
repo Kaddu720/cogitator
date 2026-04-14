@@ -3,6 +3,7 @@
  *
  * This module owns:
  *   - Prompt fragment path constants and the async fragment cache/loader
+ *   - Targeted file access policy/types/helpers for disciplined reads and searches
  *   - Bash command safety classification (DESTRUCTIVE/SAFE patterns, isSafeCommand)
  *   - Mode tool allowlists and getModeTools
  *   - Protected path constant and loadProtectedPaths
@@ -18,6 +19,7 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Mode } from "./runtime.js";
 import { type ProjectRecord } from "./projects.js";
@@ -34,6 +36,140 @@ const PROTECTED_SECRET_ROOT = "/run/cogitator-secrets";
 /** Return the list of filesystem paths that are always blocked from agent access. */
 export function loadProtectedPaths(): string[] {
   return [PROTECTED_SECRET_ROOT];
+}
+
+// ─── Targeted file access policy ────────────────────────────────────────────────
+
+export interface ReadAccessPolicy {
+  maxDirectReadLines: number;
+  maxDirectReadBytes: number;
+  requireWindowedReadAboveLines: number;
+  blockRepeatedFullReads: boolean;
+}
+
+export interface SearchAccessPolicy {
+  defaultSearchLimit: number;
+  maxSearchLimit: number;
+  requireGlobForWideSearch: boolean;
+}
+
+export interface TargetedAccessPolicy {
+  read: ReadAccessPolicy;
+  search: SearchAccessPolicy;
+}
+
+const DEFAULT_READ_ACCESS_POLICY: ReadAccessPolicy = {
+  maxDirectReadLines: 200,
+  maxDirectReadBytes: 16 * 1024,
+  requireWindowedReadAboveLines: 200,
+  blockRepeatedFullReads: true,
+};
+
+const DEFAULT_SEARCH_ACCESS_POLICY: SearchAccessPolicy = {
+  defaultSearchLimit: 20,
+  maxSearchLimit: 100,
+  requireGlobForWideSearch: true,
+};
+
+const TARGETED_ACCESS_POLICIES: Record<Mode, TargetedAccessPolicy> = {
+  normal: { read: DEFAULT_READ_ACCESS_POLICY, search: DEFAULT_SEARCH_ACCESS_POLICY },
+  creative: { read: DEFAULT_READ_ACCESS_POLICY, search: DEFAULT_SEARCH_ACCESS_POLICY },
+  plan: { read: DEFAULT_READ_ACCESS_POLICY, search: DEFAULT_SEARCH_ACCESS_POLICY },
+  readonly: { read: DEFAULT_READ_ACCESS_POLICY, search: DEFAULT_SEARCH_ACCESS_POLICY },
+};
+
+function parsePositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  const parsed = Math.trunc(value);
+  return parsed > 0 ? parsed : undefined;
+}
+
+function normalizeSearchPath(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function isMeaningfullyNarrowingGlob(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const glob = value.trim();
+  if (glob.length === 0) return false;
+  return !["*", "**", "**/*", "./**/*", "./**", "./*"].includes(glob);
+}
+
+function hasMeaningfulFindNarrowing(input: Record<string, unknown>): boolean {
+  return isMeaningfullyNarrowingGlob(input.pattern) || isMeaningfullyNarrowingGlob(input.glob);
+}
+
+export function getTargetedAccessPolicy(mode: Mode): TargetedAccessPolicy {
+  return TARGETED_ACCESS_POLICIES[mode];
+}
+
+export function getReadAccessPolicy(mode: Mode): ReadAccessPolicy {
+  return getTargetedAccessPolicy(mode).read;
+}
+
+export function getSearchAccessPolicy(mode: Mode): SearchAccessPolicy {
+  return getTargetedAccessPolicy(mode).search;
+}
+
+export function isWindowedReadRequest(input: Record<string, unknown>): boolean {
+  return parsePositiveInteger(input.offset) !== undefined || parsePositiveInteger(input.limit) !== undefined;
+}
+
+export function getRequestedReadLimit(input: Record<string, unknown>): number | undefined {
+  return parsePositiveInteger(input.limit);
+}
+
+export function getRequestedSearchLimit(input: Record<string, unknown>): number | undefined {
+  return parsePositiveInteger(input.limit);
+}
+
+export function hasReasonableSearchLimit(input: Record<string, unknown>, mode: Mode): boolean {
+  const requested = getRequestedSearchLimit(input);
+  return requested === undefined || requested <= getSearchAccessPolicy(mode).maxSearchLimit;
+}
+
+export function getEffectiveSearchLimit(input: Record<string, unknown>, mode: Mode): number {
+  const requested = getRequestedSearchLimit(input);
+  if (requested !== undefined && requested <= getSearchAccessPolicy(mode).maxSearchLimit) return requested;
+  return getSearchAccessPolicy(mode).defaultSearchLimit;
+}
+
+export function isBroadSearchPath(searchPath: unknown, cwd?: string, repoRoot?: string): boolean {
+  const normalized = normalizeSearchPath(searchPath);
+  if (!normalized) return true;
+  if ([".", "./", "/"].includes(normalized)) return true;
+  const base = repoRoot ?? cwd;
+  if (!base) return false;
+  return resolve(base, normalized) === base;
+}
+
+export function requiresSearchGlob(
+  input: Record<string, unknown>,
+  cwd: string | undefined,
+  repoRoot: string | undefined,
+  mode: Mode,
+  toolName: "grep" | "find" = "grep",
+): boolean {
+  if (!getSearchAccessPolicy(mode).requireGlobForWideSearch) return false;
+  if (!isBroadSearchPath(input.path, cwd, repoRoot)) return false;
+  if (toolName === "find") return !hasMeaningfulFindNarrowing(input);
+  return !isMeaningfullyNarrowingGlob(input.glob);
+}
+
+export function isBroadInspectionBash(command: string): boolean {
+  const segments = command
+    .split(/&&|\|\||;|\|(?!\|)/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+  return segments.some((segment) => [
+    /^find\s+(\.\s*|\/|\$PWD\b)/i,
+    /^rg\b/i,
+    /^grep\s+-R\b.*\s(\.\s*|\/|\$PWD\b)/i,
+    /^ls\s+-R\b/i,
+    /^tree\b(?:\s+\.?)?$/i,
+    /^nl\s+-ba\b/i,
+    /^sed\s+-n\b.*\s+\S+\s*$/i,
+  ].some((pattern) => pattern.test(segment)));
 }
 
 // ─── Mode tool allowlists ───────────────────────────────────────────────────────
@@ -89,10 +225,12 @@ export function isSafeCommand(command: string): boolean {
 // Defined before MODE_DESCRIPTORS so descriptor promptPath fields can reference them.
 
 export const CHANGE_PROPOSAL_WORKFLOW_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/change-proposal-workflow.md", import.meta.url));
+export const TARGETED_FILE_ACCESS_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/targeted-file-access.md", import.meta.url));
 export const SECRET_SAFETY_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/secret-safety.md", import.meta.url));
 export const MODE_NORMAL_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/mode-normal.md", import.meta.url));
 export const MODE_READONLY_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/mode-readonly.md", import.meta.url));
 export const MODE_PLAN_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/mode-plan.md", import.meta.url));
+export const MODE_CREATIVE_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/mode-creative.md", import.meta.url));
 export const PROJECT_CONTEXT_GUIDANCE_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/project-context-guidance.md", import.meta.url));
 
 // ─── Mode descriptor types ──────────────────────────────────────────────────────
@@ -139,8 +277,8 @@ export const MODE_DESCRIPTORS: Record<Mode, ModeDescriptor> = {
     promptPath: MODE_PLAN_PROMPT_PATH,
     notification: (project) =>
       project
-        ? `Plan mode enabled. Project state and artifacts stay writable for ${project.name}.`
-        : "Plan mode enabled. Load a project to allow state/artifact writes.",
+        ? `Plan mode enabled. Claude Opus 4.6 is the default model with GPT-5.4 as the alternate; project state and artifacts stay writable for (${project.id}) ${project.name}.`
+        : "Plan mode enabled. Claude Opus 4.6 is the default model with GPT-5.4 as the alternate. Load a project to allow state/artifact writes.",
     writePolicy: { unrestricted: false, projectScopeOnly: true, blocked: false },
     requiresSafeBash: true,
     persistAcrossRestart: false,
@@ -152,7 +290,7 @@ export const MODE_DESCRIPTORS: Record<Mode, ModeDescriptor> = {
     themeColor: "muted",
     toolAllowlist: null,
     promptPath: MODE_NORMAL_PROMPT_PATH,
-    notification: () => "Normal mode enabled. Full tool access restored.",
+    notification: () => "Normal mode enabled. Full tool access restored with GPT-5.4 as the default model and Sonnet 4.5 as the alternate.",
     writePolicy: { unrestricted: true, projectScopeOnly: false, blocked: false },
     requiresSafeBash: false,
     persistAcrossRestart: false,
@@ -168,6 +306,18 @@ export const MODE_DESCRIPTORS: Record<Mode, ModeDescriptor> = {
     writePolicy: { unrestricted: false, projectScopeOnly: false, blocked: true },
     requiresSafeBash: false,
     persistAcrossRestart: true,
+  },
+  creative: {
+    key: "creative",
+    label: "creative",
+    emoji: "🎨",
+    themeColor: "accent",
+    toolAllowlist: null,
+    promptPath: MODE_CREATIVE_PROMPT_PATH,
+    notification: () => "Creative mode enabled. Normal-mode permissions with all configured models available via /model.",
+    writePolicy: { unrestricted: true, projectScopeOnly: false, blocked: false },
+    requiresSafeBash: false,
+    persistAcrossRestart: false,
   },
 };
 
@@ -197,7 +347,7 @@ export function formatMode(mode: Mode): string {
 
 export function projectStatusLine(project: ProjectRecord | null, mode: Mode): string {
   if (!project) return formatMode(mode);
-  return `${project.name} · ${formatMode(mode)}`;
+  return `(${project.id}) ${project.name} · ${formatMode(mode)}`;
 }
 
 // ─── Prompt fragment loading ────────────────────────────────────────────────────
