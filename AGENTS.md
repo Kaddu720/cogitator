@@ -6,12 +6,26 @@ Pi packages (like `pi-web-access`) are integrated through the `packages` field i
 the generated `settings.json`, not through explicit `--extension` CLI arguments.
 
 Current working behavior:
-- The flake builds the package with `buildNpmPackage`, installs it under
-  `$out/share/<package-name>`, and symlinks required peer dependencies.
-- The generated `settings.json` includes the package path in its `packages` array.
-- Pi's package manager discovers extensions, skills, and commands from the
-  package's `package.json` `pi` manifest automatically.
-- Extension tools, commands, and skills all load through this single mechanism.
+- Pi core version is tracked via the `pi` flake input (`badlogic/pi-mono` tag/rev)
+  and auto-derived from `packages/coding-agent/package.json` in that input.
+- The actual build uses the published npm tarball for that version (pre-built
+  `dist/`), not a source build from the monorepo.
+- When `nix flake update` bumps the `pi` input, the version changes
+  automatically but `fetchzip.hash`, `npmDepsHash`, and
+  `pi-package-lock.json` must be updated manually.
+- `flake.lock` updates are user-managed/manual in this repo; do not edit
+  `flake.lock` unless user explicitly asks for it.
+- Preferred pattern: every pi extension/package in this repo ships as a package
+  root under `$out/share/<package-name>` with a root `package.json`.
+- That root `package.json` should include `keywords = ["pi-package"]` and an
+  explicit `pi` manifest declaring its extensions, skills, commands/prompts, or
+  themes.
+- The flake should package resources so the generated `settings.json` can add
+  that package-root path to its `packages` array.
+- Pi's package manager then discovers resources from the manifest.
+- Conventional-directory fallback (for example bare `skills/` without a manifest)
+  is compatibility-only and not the preferred pattern for new or updated
+  packages in this repo.
 
 If extension tools appear missing:
 1. Check the operating mode — plan mode only exposes a curated tool set

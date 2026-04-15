@@ -4,6 +4,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    pi = {
+      url = "github:badlogic/pi-mono/v0.67.2";
+      flake = false;
+    };
     pi-web-access = {
       url = "git+https://github.com/nicobailon/pi-web-access.git";
       flake = false;
@@ -20,17 +24,18 @@
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
 
-        piVersion = "0.65.2";
         defaultControlRoot = "/home/kaddu/.local/share/cogitator";
         workflowExtension = ./extensions/workflow-mode.ts;
         controlRootGitignore = ./control-root.gitignore;
+        # Version auto-derived from flake input; hashes updated manually per bump.
+        piVersion = (builtins.fromJSON (builtins.readFile "${inputs.pi}/packages/coding-agent/package.json")).version;
         piPackageLock = ./pi-package-lock.json;
         piWebAccessSrc = inputs.pi-web-access;
         cavemanSrc = inputs.caveman;
 
         piSrc = pkgs.fetchzip {
           url = "https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-${piVersion}.tgz";
-          hash = "sha256-2b/PMyyNUGVXUVZ754e72RKQPIxkogFV2Te4/L+Ol1s=";
+          hash = "sha256-D1l37BnJN+by3F7XnkGnJ1eTQC5kX0KHiUXy5/I0uKI=";
           stripRoot = false;
         };
 
@@ -39,7 +44,7 @@
           version = piVersion;
           src = piSrc;
           sourceRoot = "source/package";
-          npmDepsHash = "sha256-WGRqUm73WJAjinKdyIMi0d2JTkVnTCL/PxuQ6GR2wiM=";
+          npmDepsHash = "sha256-o12mImfKKXd3rUd/mK7WxJEfpORqdcI1LOnJxGujZdU=";
 
           dontNpmBuild = true;
           npmPackFlags = [ "--ignore-scripts" ];
@@ -95,6 +100,16 @@
           mkdir -p "$out/share"
           cp -r ${cavemanSrc} "$out/share/caveman"
           chmod -R u+w "$out/share/caveman"
+          cat > "$out/share/caveman/package.json" <<'EOF'
+{
+  "name": "caveman-package",
+  "version": "0.0.0-${inputs.caveman.rev or "unstable"}",
+  "keywords": ["pi-package"],
+  "pi": {
+    "skills": ["./skills"]
+  }
+}
+EOF
         '';
 
         validEnvVarPattern = "^[A-Z_][A-Z0-9_]*$";
@@ -232,7 +247,7 @@
               ++ extraRuntimeTools;
 
             runtimePath = lib.makeBinPath runtimeTools;
-            staticStoreRoots = lib.unique (map toString ([ piPkg piBasePkg ] ++ runtimeTools ++ extensions));
+            staticStoreRoots = lib.unique (map toString ([ piPkg piBasePkg cavemanPkg ] ++ runtimeTools ++ extensions));
 
             piPkg = pkgs.writeShellScriptBin "pi" ''
               set -euo pipefail

@@ -36,17 +36,34 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1775710090,
-        "narHash": "sha256-ar3rofg+awPB8QXDaFJhJ2jJhu+KqN/PRCXeyuXR76E=",
+        "lastModified": 1776169885,
+        "narHash": "sha256-l/iNYDZ4bGOAFQY2q8y5OAfBBtrDAaPuRQqWaFHVRXM=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
+        "rev": "4bd9165a9165d7b5e33ae57f3eecbcb28fb231c9",
         "type": "github"
       },
       "original": {
         "owner": "NixOS",
         "ref": "nixos-unstable",
         "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "pi": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1776202877,
+        "narHash": "sha256-trZOz+8nkuFq/JoW9BTDyqD5kN8WuL2SaxSgb45JdEY=",
+        "owner": "badlogic",
+        "repo": "pi-mono",
+        "rev": "5a3e70238958b13092124a25abe9ae72235eb8ac",
+        "type": "github"
+      },
+      "original": {
+        "owner": "badlogic",
+        "ref": "v0.67.2",
+        "repo": "pi-mono",
         "type": "github"
       }
     },
@@ -71,6 +88,7 @@
         "caveman": "caveman",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
+        "pi": "pi",
         "pi-web-access": "pi-web-access"
       }
     },
