@@ -14,13 +14,10 @@ Detailed reference docs live in `docs/`:
 
 ## What this flake provides
 
-- self-contained packaged `pi`
 - `cogi` for Level 2-style sandboxing on NixOS
 - `cogitator-init-project` to bootstrap a project in the control root
 - an overlay exposing:
   - `pkgs.cogitator`
-  - `pkgs.cogitator-pi`
-  - `pkgs.cogitator-pi-base`
   - `pkgs.cogitator-init-project`
 - a bundled extension that adds:
   - `/project`
@@ -237,12 +234,6 @@ nix run .#cogitator-init-project -- my-project-id \
   --repo /path/to/repo-one \
   --repo /path/to/repo-two \
   --tag infra
-```
-
-Run packaged pi directly:
-
-```bash
-nix run .#pi
 ```
 
 Run sandboxed pi in the current repo:

@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { createBashTool } from "@mariozechner/pi-coding-agent";
+import { BorderedLoader, createBashTool } from "@mariozechner/pi-coding-agent";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { type Mode, persistMode, restoreMode, persistProjectSelection, restoreStoredProjectId } from "./runtime.js";
@@ -25,7 +25,10 @@ import {
   isRepoPathVisibleInSession,
   loadProjects,
   createProjectScaffold,
+  deleteProjectScaffold,
+  buildInitialStateMarkdownWithModel,
   buildProjectContext,
+  updateProjectMetadata,
 } from "./projects.js";
 import {
   type WeeklySummaryState,
@@ -151,6 +154,7 @@ interface WorkflowRuntimeState {
 
 export default function workflowModeExtension(pi: ExtensionAPI): void {
   const protectedPaths = loadProtectedPaths();
+  const planResearchTools = ["web_search", "fetch_content", "get_search_content", "code_search"];
   let baseTools: string[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
   const state: WorkflowRuntimeState = {
     currentMode: "plan",
@@ -167,6 +171,12 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
   // ─── Proposal state accessors ─────────────────────────────────────────────────
 
   const ps = () => state.pendingProposals;
+
+  function getActiveToolsForMode(mode: Mode): string[] {
+    const tools = getModeTools(baseTools, mode);
+    if (mode !== "plan") return tools;
+    return [...new Set([...tools, ...planResearchTools.filter((tool) => baseTools.includes(tool))])];
+  }
 
   function persistApprovalState(): void { persistApprovalGateState(pi, ps()); }
 
@@ -379,7 +389,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
 
   async function applyMode(mode: Mode, ctx: ExtensionContext, notify = true): Promise<void> {
     state.currentMode = mode;
-    pi.setActiveTools(getModeTools(baseTools, state.currentMode));
+    pi.setActiveTools(getActiveToolsForMode(state.currentMode));
     persistMode(pi, state.currentMode);
     updateStatus(ctx);
     if (notify && ctx.hasUI) {
@@ -458,8 +468,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     const projects = await loadProjects();
     state.activeRepoRoot = await getGitRoot(ctx.cwd);
     const repoProjects = projects
-      .filter((p) => matchesRepo(p, state.activeRepoRoot))
-      .sort((a, b) => a.id.localeCompare(b.id));
+      .filter((p) => matchesRepo(p, state.activeRepoRoot));
 
     const NEW_PROJECT = "+ New project…";
     const NO_PROJECT = "No project";
@@ -505,9 +514,43 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         repos: repoPaths.map((p, i) => ({ path: p, name: inferRepoName(p), role: i === 0 ? "primary" : "supporting" })),
       };
       try {
+        let initialStateOptions = {};
+        if (ctx.model) {
+          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+          const hasHeaders = !!auth.headers && Object.keys(auth.headers).length > 0;
+          if (auth.ok && (auth.apiKey || hasHeaders)) {
+            initialStateOptions = { model: ctx.model, apiKey: auth.apiKey, headers: auth.headers, signal: ctx.signal };
+          }
+        }
+
         const created = await createProjectScaffold(project);
+        const loaderLabel = ctx.model && "model" in initialStateOptions
+          ? `Generating initial project state with ${ctx.model.id}...`
+          : "Generating initial project state...";
+        const generatedState = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+          const loader = new BorderedLoader(tui, theme, loaderLabel);
+          loader.onAbort = () => done(null);
+
+          const doGenerate = async () => {
+            const stateOptions = "model" in initialStateOptions ? { ...initialStateOptions, signal: loader.signal } : initialStateOptions;
+            return await buildInitialStateMarkdownWithModel(project, stateOptions);
+          };
+
+          doGenerate()
+            .then(done)
+            .catch(() => done(null));
+
+          return loader;
+        });
+        if (generatedState === null) {
+          ctx.ui.notify(`Project scaffold created for (${created.id}) ${created.name}, but initial state generation was cancelled before the final draft was written.`, "warning");
+          return;
+        }
+        await writeFile(getProjectStatePath(created), generatedState, "utf8");
         await setActiveProject(created, ctx, false);
         const lines = [`Created project: (${created.id}) ${created.name}`, `State: ${getProjectStatePath(created)}`, `Artifacts: ${getProjectArtifactsPath(created)}`, "The new project is now active for this session."];
+        if (ctx.model && "model" in initialStateOptions) lines.push(`Initial state drafted with model: ${ctx.model.id}`);
+        else lines.push("Initial state used deterministic scaffolding because no model/auth was available.");
         if (created.repos.some((r) => !isRepoPathVisibleInSession(r.path, state.activeRepoRoot))) lines.push("Restart cogi to mount any newly linked repositories into the sandbox.");
         ctx.ui.notify(lines.join("\n"), "success");
       } catch (error) { ctx.ui.notify(`Failed to create project: ${String(error)}`, "warning"); }
@@ -530,13 +573,66 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       if (!rawPath) return;
       const resolvedRepoPath = resolveFrom(ctx.cwd, normalizeInputPath(rawPath), state.activeRepoRoot);
       if (state.activeProject.repos.some((r) => resolve(r.path) === resolvedRepoPath)) { if (ctx.hasUI) ctx.ui.notify(`Repo already linked to this project: ${resolvedRepoPath}`, "info"); return; }
-      const updatedProject: ProjectRecord = { ...state.activeProject, repos: [...state.activeProject.repos, { path: resolvedRepoPath }] };
-      const projectJsonPath = resolve(state.activeProject.dir, "project.json");
-      let projectJson: Record<string, unknown> = { id: updatedProject.id, name: updatedProject.name, stateFile: updatedProject.stateFile, artifactsDir: updatedProject.artifactsDir, repos: updatedProject.repos, repoContexts: updatedProject.repoContexts };
-      try { const parsed = JSON.parse(await readFile(projectJsonPath, "utf8")) as Record<string, unknown>; if (parsed && typeof parsed === "object") projectJson = { ...parsed, repos: updatedProject.repos }; } catch { /* rebuild */ }
-      await writeFile(projectJsonPath, `${JSON.stringify(projectJson, null, 2)}\n`, "utf8");
+      const updatedProject: ProjectRecord = await updateProjectMetadata(state.activeProject, {
+        repos: [...state.activeProject.repos, { path: resolvedRepoPath }],
+      });
       await setActiveProject(updatedProject, ctx, false);
       if (ctx.hasUI) ctx.ui.notify([`Added linked repo to (${updatedProject.id}) ${updatedProject.name}: ${resolvedRepoPath}`, "Restart cogi to mount the new repository into the sandbox."].join("\n"), "success");
+    },
+
+    "delete-project": async (args, ctx) => {
+      const suppliedId = typeof args === "string"
+        ? args.trim()
+        : Array.isArray(args) && args.every((e) => typeof e === "string")
+          ? args.join(" ").trim()
+          : "";
+      const projects = await loadProjects();
+      if (projects.length === 0) { if (ctx.hasUI) ctx.ui.notify("No projects are available to delete.", "info"); return; }
+
+      let projectToDelete: ProjectRecord | undefined;
+      if (suppliedId) {
+        const normalized = slugifyProjectId(suppliedId);
+        projectToDelete = projects.find((p) => p.id === normalized || p.name === suppliedId);
+        if (!projectToDelete) { if (ctx.hasUI) ctx.ui.notify(`Project not found: ${suppliedId}`, "warning"); return; }
+      } else if (state.activeProject) {
+        projectToDelete = state.activeProject;
+      } else if (ctx.hasUI) {
+        const options = projects.map((p) => `(${p.id}) ${p.name}`);
+        const choice = await ctx.ui.select("Delete project", options);
+        if (!choice) return;
+        const index = options.indexOf(choice);
+        projectToDelete = projects[index];
+      }
+
+      if (!projectToDelete) { if (ctx.hasUI) ctx.ui.notify("No project selected for deletion.", "warning"); return; }
+
+      if (ctx.hasUI) {
+        const confirmation = await ctx.ui.select(
+          `Delete (${projectToDelete.id}) ${projectToDelete.name}? This removes only the Cogitator project scaffold.`,
+          ["Cancel", `Delete project (${projectToDelete.id})`],
+        );
+        if (confirmation !== `Delete project (${projectToDelete.id})`) {
+          ctx.ui.notify("Project deletion cancelled.", "info");
+          return;
+        }
+
+        const typedConfirmation = ((await ctx.ui.input(
+          "Type project id to confirm deletion",
+          `Type ${projectToDelete.id} to permanently delete this project scaffold`,
+        )) ?? "").trim();
+        if (typedConfirmation !== projectToDelete.id) {
+          ctx.ui.notify(`Project deletion cancelled: expected '${projectToDelete.id}'.`, "info");
+          return;
+        }
+      }
+
+      try {
+        await deleteProjectScaffold(projectToDelete);
+        if (state.activeProject?.id === projectToDelete.id) await setActiveProject(null, ctx, false);
+        if (ctx.hasUI) ctx.ui.notify(`Deleted project: (${projectToDelete.id}) ${projectToDelete.name}\nRemoved: ${projectToDelete.dir}\nLinked repositories were not modified.`, "success");
+      } catch (error) {
+        if (ctx.hasUI) ctx.ui.notify(`Failed to delete project: ${String(error)}`, "warning");
+      }
     },
 
     "weekly-summary": async (_args, ctx) => {
@@ -595,6 +691,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
 
   const shortcutHandlers: ShortcutHandlers = {
     "ctrl+alt+p": async (ctx) => applyMode(state.currentMode === "plan" ? "normal" : "plan", ctx),
+    "shift+tab": async (ctx) => applyMode(state.currentMode === "plan" ? "normal" : "plan", ctx),
     "ctrl+alt+r": async (ctx) => applyMode(state.currentMode === "readonly" ? "normal" : "readonly", ctx),
   };
 
@@ -620,7 +717,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         if (state.activeProject) persistProjectSelection(pi, state.activeProject.id);
       }
       if (ctx.hasUI && !state.activeProject) { await selectProject(ctx); }
-      pi.setActiveTools(getModeTools(baseTools, state.currentMode));
+      pi.setActiveTools(getActiveToolsForMode(state.currentMode));
       updateStatus(ctx);
     },
 
@@ -633,7 +730,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       const restoredProjectId = restoreStoredProjectId(ctx);
       if (restoredProjectId === null) { state.activeProject = null; }
       else if (typeof restoredProjectId === "string") { const projects = await loadProjects(); state.activeProject = projects.find((p) => p.id === restoredProjectId) ?? null; }
-      pi.setActiveTools(getModeTools(baseTools, state.currentMode));
+      pi.setActiveTools(getActiveToolsForMode(state.currentMode));
       updateStatus(ctx);
     },
 

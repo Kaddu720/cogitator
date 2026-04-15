@@ -21,6 +21,7 @@ export interface CommandHandlers {
   "new-project": CommandHandler;
   "project-status": CommandHandler;
   "add-repo": CommandHandler;
+  "delete-project": CommandHandler;
   "weekly-summary": CommandHandler;
   "approval-status": CommandHandler;
   reject: CommandHandler;
@@ -34,6 +35,7 @@ export interface CommandHandlers {
 
 export interface ShortcutHandlers {
   "ctrl+alt+p": ShortcutHandler;
+  "shift+tab": ShortcutHandler;
   "ctrl+alt+r": ShortcutHandler;
 }
 
@@ -65,6 +67,11 @@ export function registerCommands(
   pi.registerCommand("add-repo", {
     description: "Add a linked repository to the active project",
     handler: commands["add-repo"],
+  });
+
+  pi.registerCommand("delete-project", {
+    description: "Delete a Cogitator project scaffold without touching linked repositories",
+    handler: commands["delete-project"],
   });
 
   pi.registerCommand("weekly-summary", {
@@ -115,6 +122,11 @@ export function registerCommands(
   pi.registerShortcut("ctrl+alt+p", {
     description: "Toggle plan mode",
     handler: shortcuts["ctrl+alt+p"],
+  });
+
+  pi.registerShortcut("shift+tab", {
+    description: "Toggle plan mode",
+    handler: shortcuts["shift+tab"],
   });
 
   pi.registerShortcut("ctrl+alt+r", {

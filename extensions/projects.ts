@@ -12,7 +12,8 @@
  * Import direction: workflow-mode.ts → projects.ts (never the reverse).
  */
 
-import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { complete, type UserMessage } from "@mariozechner/pi-ai";
+import { access, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +34,8 @@ export interface ProjectRecord {
   artifactsDir: string;
   repos: ProjectRepoLink[];
   repoContexts: string[];
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface NewProjectWizardResult {
@@ -42,10 +45,18 @@ export interface NewProjectWizardResult {
   repos: ProjectRepoLink[];
 }
 
+export interface InitialStateGenerationOptions {
+  model?: Parameters<typeof complete>[0] | null;
+  apiKey?: string;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+}
+
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
 const DEFAULT_CONTROL_ROOT = "/home/kaddu/.local/share/cogitator";
 const PROJECTS_DIRNAME = "projects";
+const REPO_CONTEXTS_DIRNAME = "repoContexts";
 
 export const STATE_FILE_DEFAULT = "state.md";
 export const ARTIFACTS_DIR_DEFAULT = "artifacts";
@@ -67,6 +78,10 @@ export function getControlRoot(): string {
 
 export function getProjectsRoot(): string {
   return resolve(getControlRoot(), PROJECTS_DIRNAME);
+}
+
+export function getRepoContextsRoot(): string {
+  return resolve(getControlRoot(), REPO_CONTEXTS_DIRNAME);
 }
 
 export function getResolutionBase(cwd: string | undefined, repoRoot?: string): string {
@@ -218,6 +233,26 @@ export function isRepoPathVisibleInSession(repoPath: string, repoRoot: string | 
 
 // ─── Project loading ────────────────────────────────────────────────────────────
 
+function parseOptionalTimestamp(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function timestampToMillis(value: string | undefined): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function compareProjectsByRecentActivity(a: ProjectRecord, b: ProjectRecord): number {
+  const updatedDiff = timestampToMillis(b.updatedAt) - timestampToMillis(a.updatedAt);
+  if (updatedDiff !== 0) return updatedDiff;
+
+  const createdDiff = timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt);
+  if (createdDiff !== 0) return createdDiff;
+
+  return a.id.localeCompare(b.id);
+}
+
 export async function loadProjects(): Promise<ProjectRecord[]> {
   const root = getProjectsRoot();
   let dirEntries: Awaited<ReturnType<typeof readdir>>;
@@ -245,6 +280,8 @@ export async function loadProjects(): Promise<ProjectRecord[]> {
         repos?: unknown;
         repoContexts?: unknown;
         contextFiles?: unknown;
+        createdAt?: unknown;
+        updatedAt?: unknown;
       };
 
       const id = typeof raw.id === "string" && raw.id.length > 0 ? raw.id : entry.name;
@@ -259,79 +296,156 @@ export async function loadProjects(): Promise<ProjectRecord[]> {
         artifactsDir: typeof raw.artifactsDir === "string" ? raw.artifactsDir : ARTIFACTS_DIR_DEFAULT,
         repos: parseRepoLinks(raw.repos),
         repoContexts,
+        createdAt: parseOptionalTimestamp(raw.createdAt),
+        updatedAt: parseOptionalTimestamp(raw.updatedAt),
       });
     } catch {
       // Ignore malformed project definitions; one bad project.json must not break startup.
     }
   }
 
-  return projects.sort((a, b) => a.id.localeCompare(b.id));
+  return projects.sort(compareProjectsByRecentActivity);
 }
 
 // ─── Project scaffolding ────────────────────────────────────────────────────────
 
 export async function buildInitialStateMarkdown(project: NewProjectWizardResult): Promise<string> {
   const today = new Date().toISOString().slice(0, 10);
+  const description = project.description?.trim() || "";
+  const repoLinks = project.repos.map((repo) => {
+    const extras = [repo.name, repo.role].filter(Boolean).join(" · ");
+    return `\`${repo.path}\`${extras ? ` (${extras})` : ""}`;
+  });
   const repoPaths = project.repos.map((repo) => repo.path);
-  const description = project.description?.trim() || "Project description pending.";
-  const nextStepSummary = "Review the project description and flesh out this state file.";
+  const primaryRepo = repoLinks[0] ?? "[none]";
+  const linkedRepos = repoLinks.slice(1);
+
+  const cleanIdea = (value: string): string => value.replace(/^[\s•*\-]+/, "").replace(/\s+/g, " ").trim();
+  const ensureSentence = (value: string, fallback: string): string => {
+    const trimmed = cleanIdea(value);
+    if (trimmed.length === 0) return fallback;
+    return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+  };
+  const trimList = (items: string[], maxItems: number, fallback: string): string[] => {
+    const unique = Array.from(new Set(items.map(cleanIdea).filter((item) => item.length > 0)));
+    return unique.slice(0, maxItems).length > 0 ? unique.slice(0, maxItems) : [fallback];
+  };
+
+  const descriptionIdeas = description.length > 0
+    ? Array.from(new Set(
+      description
+        .split(/\r?\n+/)
+        .flatMap((line) => line.split(/(?<=[.;!?])\s+|\s+-\s+/))
+        .map(cleanIdea)
+        .filter((item) => item.length > 0),
+    ))
+    : [];
+
+  const focusItems = trimList(
+    descriptionIdeas.slice(0, 2).map((idea, index) => index === 0 ? ensureSentence(idea, "") : ensureSentence(idea, "")),
+    2,
+    "Review the project description and identify the first concrete workstream.",
+  );
+
+  const constraintItems = trimList(
+    [
+      ...descriptionIdeas.filter((idea) => /\b(must|should|need|needs|require|required|expect|expected|want)\b/i.test(idea)).map((idea) => ensureSentence(idea, "")),
+      repoPaths.length > 1 ? "Implementation may span multiple linked repositories." : "Work should stay aligned with the linked primary repository.",
+    ],
+    2,
+    "No explicit constraints recorded yet.",
+  );
+
+  const assumptionItems = trimList(
+    [
+      description.length > 0
+        ? `Initial state was synthesized from the project description provided during setup on ${today}.`
+        : `Initial scaffold was created on ${today}; refine this file after the first review.`,
+      repoPaths.length > 1 ? "Supporting repositories provide additional execution context." : "The primary repository contains the main implementation surface.",
+    ],
+    2,
+    `Initial scaffold was created on ${today}.`,
+  );
+
+  const goal = descriptionIdeas.length > 0
+    ? ensureSentence(descriptionIdeas[0], `Define and execute the initial goal for ${project.name}.`)
+    : `Define and execute the initial goal for ${project.name}.`;
+
+  const keyFileLocations = [
+    ...(repoPaths[0] ? [`- \`${repoPaths[0]}\`: primary linked repository for this project`] : []),
+    ...repoPaths.slice(1, 3).map((repoPath) => `- \`${repoPath}\`: supporting linked repository`),
+    "- `project.json`: project metadata",
+    "- `state.md`: project working state",
+    "- `artifacts/`: generated outputs",
+    `- \`${getRepoContextsRoot()}\`: shared repo-specific private guidance under the control root`,
+  ].join("\n");
+
+  const todoItems = trimList(
+    [
+      description.length > 0 ? `Confirm the initial goal and success criteria implied by the description: ${ensureSentence(descriptionIdeas[0] ?? description, "")}` : "Confirm the initial goal and success criteria for this project.",
+      repoPaths[0] ? `Inspect \`${repoPaths[0]}\` and identify the first implementation entry points.` : "Identify the first implementation entry points.",
+      linkedRepos.length > 0 ? "Confirm which linked repositories need repo context files or additional notes." : "Add any missing repo context files or supporting notes if needed.",
+    ],
+    3,
+    "Review the project description and define the first actionable task.",
+  );
+
+  const nextSteps = trimList(
+    [
+      todoItems[0],
+      todoItems[1] ?? "Identify the first implementation entry points.",
+    ],
+    2,
+    "Review the project description and define the first actionable task.",
+  );
+  const nextStepSummary = nextSteps[0];
 
   const SHUTDOWN_CHECKPOINT_START = "<!-- COGITATOR:SESSION_SHUTDOWN_CHECKPOINT:START -->";
   const SHUTDOWN_CHECKPOINT_END = "<!-- COGITATOR:SESSION_SHUTDOWN_CHECKPOINT:END -->";
 
   let template = await readFile(SHARED_PROJECT_STATE_TEMPLATE_PATH, "utf8");
-  template = template.replace("# <Project Name>", `# ${project.name}\n\n## Description\n\n${description}`);
+  template = template.replace("# <Project Name>", `# ${project.name}`);
+  template = removeMarkdownSection(template, "## Description");
   template = removeMarkdownSection(template, "## Project Metadata");
+  template = removeMarkdownSection(template, "## Background & Context");
+  template = removeMarkdownSection(template, "## Implementation Plan");
+  template = removeMarkdownSection(template, "## Open Questions & Blockers");
+  template = removeMarkdownSection(template, "## Requested Backlog");
+  template = removeMarkdownSection(template, "## Deferred Approval Items");
   template = replaceMarkdownSection(
     template,
     "## Executive Summary",
-    `- Status: todo\n- Goal: TBD\n- Updated: ${today}`,
+    `- Status: todo\n- Goal: ${goal}`,
   );
   template = replaceMarkdownSection(
     template,
-    "## Background & Context",
-    `- status: todo\n- repo(s):\n${formatStateBulletList(repoPaths, "Add repo path", "  ")}\n- current focus:\n${formatStateBulletList([], "Populate from the project description", "  ")}\n- constraints:\n${formatStateBulletList([], "Populate from the project description", "  ")}\n- assumptions:\n${formatStateBulletList([], "Populate from the project description", "  ")}`,
+    "## Current Context",
+    `- Primary repo: ${primaryRepo}${linkedRepos.length > 0 ? `\n- Linked repos:\n${formatStateBulletList(linkedRepos, "None recorded.", "  ")}` : ""}\n- Current focus:\n${formatStateBulletList(focusItems, "Review the project description and identify the first concrete workstream.", "  ")}\n- Constraints:\n${formatStateBulletList(constraintItems, "No explicit constraints recorded yet.", "  ")}\n- Assumptions:\n${formatStateBulletList(assumptionItems, `Initial scaffold was created on ${today}.`, "  ")}`,
   );
   template = replaceMarkdownSection(
     template,
     "## Architecture Decisions",
-    `- decision: Project scaffold created\n  rationale: Establish a durable project record before substantive work begins.\n  date: ${today}\n  owner: TBD\n  status: done`,
-  );
-  template = replaceMarkdownSection(
-    template,
-    "## Implementation Plan",
-    `- [ ] Review the project description and confirm scope\n- [ ] Review linked repositories and add missing repo context\n- [ ] Start the first concrete implementation or investigation step`,
-  );
-  template = replaceMarkdownSection(
-    template,
-    "## Open Questions & Blockers",
-    `- status: in_progress\n- Confirm whether additional linked repositories, repo context files, or external metadata are required.`,
+    `- decision: Initial project state synthesized from setup inputs\n  rationale: Seed the project with a usable first-pass state derived from the description and linked repositories instead of leaving a mostly blank scaffold.\n  date: ${today}\n  owner: Cogitator\n  status: done`,
   );
   template = replaceMarkdownSection(
     template,
     "## Key File Locations",
-    `- \`project.json\`: project metadata\n- \`state.md\`: project working state\n- \`artifacts/\`: generated outputs\n- \`repoContexts/\`: repo-specific private guidance`,
-  );
-  template = replaceMarkdownSection(
-    template,
-    "## Requested Backlog",
-    `- State files\n  - Refine this project's state structure as real work clarifies the best tracking granularity\n- Projects\n  - Add any missing linked repositories or repo context files needed for execution`,
+    keyFileLocations,
   );
   template = replaceMarkdownSection(
     template,
     "## Progress Tracking",
-    `- todo:\n  - Review project description and populate state file sections\n- in_progress:\n  - Project initialization\n- blocked:\n  - None recorded\n- done:\n  - Created initial project scaffold\n- deferred:\n  - None recorded`,
+    `- todo:\n${formatStateBulletList(todoItems, "Review the project description and define the first actionable task.", "  ")}\n- in_progress:\n  - Project initialization from setup inputs\n- blocked:\n  - None recorded.\n- done:\n  - Created initial project scaffold\n  - Synthesized an initial project state from the setup description and linked repositories\n- deferred:\n  - None recorded.`,
   );
-  template = replaceMarkdownSection(template, "## Deferred Approval Items", "- None recorded");
   template = replaceMarkdownSection(
     template,
     "## Validation & Evidence",
-    `- validated:\n  - Created project scaffold under the Cogitator control root\n- evidence:\n  - \`project.json\`\n  - \`state.md\``,
+    `- validated:\n  - Created project scaffold under the Cogitator control root\n  - Populated the initial state from the setup description and linked repository list\n- evidence:\n  - \`project.json\`\n  - \`state.md\`${description.length > 0 ? `\n  - Setup description: ${ensureSentence(description, "")}` : ""}`,
   );
   template = replaceMarkdownSection(
     template,
     "## Next Steps",
-    "- Review the project description and flesh out this state file",
+    formatStateBulletList(nextSteps, "Review the project description and define the first actionable task."),
   );
   template = replaceMarkdownSection(
     template,
@@ -342,12 +456,94 @@ export async function buildInitialStateMarkdown(project: NewProjectWizardResult)
   return template;
 }
 
+export async function buildInitialStateMarkdownWithModel(
+  project: NewProjectWizardResult,
+  options: InitialStateGenerationOptions = {},
+): Promise<string> {
+  const fallback = await buildInitialStateMarkdown(project);
+  if (!options.model || !options.apiKey) return fallback;
+
+  const template = await readFile(SHARED_PROJECT_STATE_TEMPLATE_PATH, "utf8");
+  const repoList = project.repos.length > 0
+    ? project.repos.map((repo, index) => `- path: ${repo.path}${repo.name ? `\n  name: ${repo.name}` : ""}${repo.role ? `\n  role: ${repo.role}` : index === 0 ? "\n  role: primary" : ""}`).join("\n")
+    : "- none";
+
+  const SYSTEM_PROMPT = [
+    "You generate initial Cogitator project state files.",
+    "Use the provided markdown template structure and fill it out with the best available first-pass project state.",
+    "Return only markdown for the state file.",
+    "Preserve all template headings in order.",
+    "Keep the Session Shutdown Checkpoint section system-managed with placeholder values until runtime updates it.",
+    "Do not invent detailed validation results, file paths, or completed work beyond what the inputs justify.",
+    "Prefer concise, concrete content over placeholders when the description supports it.",
+  ].join(" ");
+
+  const userMessage: UserMessage = {
+    role: "user",
+    timestamp: Date.now(),
+    content: [{
+      type: "text",
+      text: [
+        "Create an initial project state markdown document for the following Cogitator project.",
+        "",
+        `Project ID: ${project.id}`,
+        `Project Name: ${project.name}`,
+        `Description: ${project.description?.trim() || "[none provided]"}`,
+        "Linked repositories:",
+        repoList,
+        "",
+        "Use this template as the required structure:",
+        "```markdown",
+        template.trim(),
+        "```",
+        "",
+        "Important requirements:",
+        "- Replace placeholders with best-effort initial content grounded in the description and linked repositories.",
+        "- Keep status vocabulary canonical.",
+        "- Keep the shutdown checkpoint block present and still placeholder/system-managed.",
+        "- Output only the completed markdown document.",
+      ].join("\n"),
+    }],
+  };
+
+  try {
+    const response = await complete(
+      options.model,
+      { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+      { apiKey: options.apiKey, headers: options.headers, signal: options.signal },
+    );
+
+    if (response.stopReason === "aborted") return fallback;
+
+    const generated = response.content
+      .filter((content): content is { type: "text"; text: string } => content.type === "text")
+      .map((content) => content.text)
+      .join("\n")
+      .trim();
+
+    if (
+      generated.length === 0
+      || !generated.includes("## Executive Summary")
+      || !generated.includes("## Session Shutdown Checkpoint")
+      || !generated.includes("<!-- COGITATOR:SESSION_SHUTDOWN_CHECKPOINT:START -->")
+      || !generated.includes("<!-- COGITATOR:SESSION_SHUTDOWN_CHECKPOINT:END -->")
+    ) {
+      return fallback;
+    }
+
+    return generated.replace(/^#\s+.*$/m, `# ${project.name}`);
+  } catch {
+    return fallback;
+  }
+}
+
 export async function createProjectScaffold(project: NewProjectWizardResult): Promise<ProjectRecord> {
   const projectDir = resolve(getProjectsRoot(), project.id);
   const projectJsonPath = resolve(projectDir, "project.json");
   const statePath = resolve(projectDir, STATE_FILE_DEFAULT);
   const artifactsPath = resolve(projectDir, ARTIFACTS_DIR_DEFAULT);
-  const repoContextsPath = resolve(projectDir, "repoContexts");
+  const repoContextsPath = getRepoContextsRoot();
+  const timestamp = new Date().toISOString();
 
   if (await fileExists(projectJsonPath)) {
     throw new Error(`Project already exists: ${projectJsonPath}`);
@@ -364,6 +560,8 @@ export async function createProjectScaffold(project: NewProjectWizardResult): Pr
     artifactsDir: ARTIFACTS_DIR_DEFAULT,
     repos: project.repos,
     repoContexts: [],
+    createdAt: timestamp,
+    updatedAt: timestamp,
   };
 
   await writeFile(projectJsonPath, `${JSON.stringify(projectJson, null, 2)}\n`, "utf8");
@@ -377,7 +575,63 @@ export async function createProjectScaffold(project: NewProjectWizardResult): Pr
     artifactsDir: ARTIFACTS_DIR_DEFAULT,
     repos: project.repos,
     repoContexts: [],
+    createdAt: timestamp,
+    updatedAt: timestamp,
   };
+}
+
+export async function updateProjectMetadata(
+  project: ProjectRecord,
+  updates: Partial<Pick<ProjectRecord, "repos" | "repoContexts">> = {},
+): Promise<ProjectRecord> {
+  const projectJsonPath = resolve(project.dir, "project.json");
+  const timestamp = new Date().toISOString();
+  const nextProject: ProjectRecord = {
+    ...project,
+    ...updates,
+    createdAt: project.createdAt ?? timestamp,
+    updatedAt: timestamp,
+  };
+
+  let projectJson: Record<string, unknown> = {
+    id: nextProject.id,
+    name: nextProject.name,
+    stateFile: nextProject.stateFile,
+    artifactsDir: nextProject.artifactsDir,
+    repos: nextProject.repos,
+    repoContexts: nextProject.repoContexts,
+    createdAt: nextProject.createdAt,
+    updatedAt: nextProject.updatedAt,
+  };
+
+  try {
+    const parsed = JSON.parse(await readFile(projectJsonPath, "utf8")) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object") {
+      projectJson = {
+        ...parsed,
+        repos: nextProject.repos,
+        repoContexts: nextProject.repoContexts,
+        createdAt: nextProject.createdAt,
+        updatedAt: nextProject.updatedAt,
+      };
+    }
+  } catch {
+    // Rebuild minimal metadata when project.json is missing or malformed.
+  }
+
+  await writeFile(projectJsonPath, `${JSON.stringify(projectJson, null, 2)}\n`, "utf8");
+  return nextProject;
+}
+
+export async function deleteProjectScaffold(project: ProjectRecord): Promise<void> {
+  const projectsRoot = resolve(getProjectsRoot());
+  const projectDir = resolve(project.dir);
+
+  if (projectDir === projectsRoot || !isSameOrWithin(projectDir, projectsRoot)) {
+    throw new Error(`Refusing to delete project outside projects root: ${projectDir}`);
+  }
+
+  await rm(projectDir, { recursive: true, force: true });
 }
 
 // ─── Project context ────────────────────────────────────────────────────────────
@@ -466,13 +720,16 @@ export async function buildProjectContext(
 
   if (project.repoContexts.length > 0) {
     const existingContexts: string[] = [];
-    for (const relativePath of project.repoContexts) {
-      const absolutePath = resolve(project.dir, relativePath);
-      if (await fileExists(absolutePath)) existingContexts.push(absolutePath);
+    const repoContextsRoot = getRepoContextsRoot();
+    for (const storedPath of project.repoContexts) {
+      const sharedPath = isAbsolute(storedPath) ? resolve(storedPath) : resolve(repoContextsRoot, storedPath);
+      const legacyProjectPath = resolve(project.dir, storedPath);
+      if (await fileExists(sharedPath)) existingContexts.push(sharedPath);
+      else if (await fileExists(legacyProjectPath)) existingContexts.push(legacyProjectPath);
     }
     if (existingContexts.length > 0) {
       sections.push("\nProject Context Files (read these if needed for repo-specific guidance):");
-      for (const p of existingContexts) sections.push(`- ${p}`);
+      for (const p of Array.from(new Set(existingContexts))) sections.push(`- ${p}`);
     }
   }
 

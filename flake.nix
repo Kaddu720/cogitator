@@ -4,9 +4,17 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    pi-web-access = {
+      url = "git+https://github.com/nicobailon/pi-web-access.git";
+      flake = false;
+    };
+    caveman = {
+      url = "git+https://github.com/JuliusBrussee/caveman.git";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = inputs@{ self, nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -17,6 +25,8 @@
         workflowExtension = ./extensions/workflow-mode.ts;
         controlRootGitignore = ./control-root.gitignore;
         piPackageLock = ./pi-package-lock.json;
+        piWebAccessSrc = inputs.pi-web-access;
+        cavemanSrc = inputs.caveman;
 
         piSrc = pkgs.fetchzip {
           url = "https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-${piVersion}.tgz";
@@ -42,6 +52,24 @@
             mkdir -p $out/share/pi
             cp -r dist docs examples package.json CHANGELOG.md README.md $out/share/pi/
 
+            # Place pi-web-access OUTSIDE node_modules so jiti will
+            # transform its TypeScript (jiti skips node_modules).
+            pwa_dir="$out/share/pi-web-access"
+            cp -r ${piWebAccessPkg}/lib/node_modules/pi-web-access "$pwa_dir"
+            chmod -R u+w "$pwa_dir"
+
+            # Symlink pi core peer dependencies into pi-web-access's
+            # node_modules so bare imports like @mariozechner/* and
+            # @sinclair/typebox resolve correctly.
+            pi_nm="$out/lib/node_modules/@mariozechner/pi-coding-agent/node_modules"
+            pwa_nm="$pwa_dir/node_modules"
+            for pkg in @mariozechner/pi-coding-agent @mariozechner/pi-ai @mariozechner/pi-tui @sinclair/typebox; do
+              if [ -d "$pi_nm/$pkg" ]; then
+                mkdir -p "$pwa_nm/$(dirname $pkg)"
+                ln -sfn "$pi_nm/$pkg" "$pwa_nm/$pkg"
+              fi
+            done
+
             makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/pi \
               --add-flags $out/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js \
               --prefix PATH : ${lib.makeBinPath [ pkgs.git ]}
@@ -49,6 +77,25 @@
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
         };
+
+        piWebAccessPkg = pkgs.buildNpmPackage rec {
+          pname = "pi-web-access";
+          version = inputs.pi-web-access.rev or "unstable";
+          src = piWebAccessSrc;
+          npmDeps = pkgs.importNpmLock {
+            npmRoot = piWebAccessSrc;
+          };
+          npmConfigHook = pkgs.importNpmLock.npmConfigHook;
+
+          dontNpmBuild = true;
+          npmPackFlags = [ "--ignore-scripts" ];
+        };
+
+        cavemanPkg = pkgs.runCommand "caveman-package" {} ''
+          mkdir -p "$out/share"
+          cp -r ${cavemanSrc} "$out/share/caveman"
+          chmod -R u+w "$out/share/caveman"
+        '';
 
         validEnvVarPattern = "^[A-Z_][A-Z0-9_]*$";
 
@@ -171,16 +218,21 @@
                 gawk
                 diffutils
                 git
+                gh
                 ripgrep
                 fd
                 bubblewrap
                 cacert
+                ffmpeg
+                yt-dlp
+                xdg-utils
                 nodejs_22
                 python3
               ])
               ++ extraRuntimeTools;
 
             runtimePath = lib.makeBinPath runtimeTools;
+            staticStoreRoots = lib.unique (map toString ([ piPkg piBasePkg ] ++ runtimeTools ++ extensions));
 
             piPkg = pkgs.writeShellScriptBin "pi" ''
               set -euo pipefail
@@ -523,12 +575,14 @@ PY
               host_pi_settings_json=""
               host_pi_models_json=""
               host_pi_auth_json=""
+              host_pi_keybindings_json=""
               if [[ -n "${HOME:-}" ]]; then
                 mkdir -p "$HOME/.pi/agent"
                 host_pi_agent_dir="$(readlink -f "$HOME/.pi/agent")"
                 host_pi_settings_json="$host_pi_agent_dir/settings.json"
                 host_pi_models_json="$host_pi_agent_dir/models.json"
                 host_pi_auth_json="$host_pi_agent_dir/auth.json"
+                host_pi_keybindings_json="$host_pi_agent_dir/keybindings.json"
               elif [[ "$bind_host_pi_auth" -eq 1 ]]; then
                 echo "--host-pi-auth requires HOME to be set in the calling environment" >&2
                 exit 1
@@ -543,6 +597,15 @@ EOF
 ${builtins.toJSON ({
                 defaultProvider = checkedPlainEnv.COGITATOR_DEFAULT_PROVIDER or null;
                 defaultModel = checkedPlainEnv.COGITATOR_DEFAULT_MODEL or null;
+                packages = [
+                  "${piBasePkg}/share/pi-web-access"
+                  "${cavemanPkg}/share/caveman"
+                ];
+              })}
+EOF
+              cat > "$agent_dir_host/cogitator-keybindings.json" <<'EOF'
+${builtins.toJSON ({
+                "app.thinking.cycle" = [ ];
               })}
 EOF
               ${pkgs.python3}/bin/python - <<'PY' "$host_pi_models_json" "$agent_dir_host/cogitator-models.json" "$agent_dir_host/models.json"
@@ -599,8 +662,43 @@ def load_json(path: str):
 result = load_json(sys.argv[1])
 overlay = load_json(sys.argv[2])
 for key, value in overlay.items():
-    if value is not None:
-        result[key] = value
+    if value is None:
+        continue
+    if key == "packages" and isinstance(value, list):
+        existing = result.get(key)
+        merged = []
+        for candidate in value + (existing if isinstance(existing, list) else []):
+            if candidate not in merged:
+                merged.append(candidate)
+        result[key] = merged
+        continue
+    result[key] = value
+
+with open(sys.argv[3], "w", encoding="utf-8") as handle:
+    json.dump(result, handle, indent=2)
+    handle.write("\n")
+PY
+              ${pkgs.python3}/bin/python - <<'PY' "$host_pi_keybindings_json" "$agent_dir_host/cogitator-keybindings.json" "$agent_dir_host/keybindings.json"
+import json
+import os
+import sys
+
+
+def load_json(path: str):
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+result = load_json(sys.argv[1])
+overlay = load_json(sys.argv[2])
+for key, value in overlay.items():
+    result[key] = value
 
 with open(sys.argv[3], "w", encoding="utf-8") as handle:
     json.dump(result, handle, indent=2)
@@ -718,7 +816,7 @@ PY
                 # ~/.local and ~/.local/share stay synthetic so the model only sees
                 # ~/.local/share/cogitator, not unrelated host files under ~/.local.
                 bind_args+=(--dir "$control_root")
-                bind_args+=(--dir "$control_root/projects")
+                bind_args+=(--bind "$control_root/projects" "$control_root/projects")
                 bind_args+=(--dir "$sessions_root")
                 bind_args+=(--bind "$sessions_root" "$sessions_root")
 
@@ -730,9 +828,6 @@ PY
                   if [[ -z "$project_dir" ]]; then
                     continue
                   fi
-                  project_name="$(basename "$project_dir")"
-                  bind_args+=(--dir "$control_root/projects/$project_name")
-                  bind_args+=(--bind "$project_dir" "$control_root/projects/$project_name")
 
                   project_repo_paths="$(${pkgs.python3}/bin/python - <<'PY' "$project_dir/project.json"
 import json
@@ -793,14 +888,40 @@ PY
                 add_bind --bind "$spec"
               done
 
+              declare -a store_roots=(
+                ${lib.concatMapStringsSep "\n                " (path: "\"${path}\"") staticStoreRoots}
+              )
+
+              normalize_store_root() {
+                local path="$1"
+                if [[ "$path" != /nix/store/* ]]; then
+                  return 1
+                fi
+                local remainder="''${path#/nix/store/}"
+                printf '/nix/store/%s\n' "''${remainder%%/*}"
+              }
+
+              add_store_root() {
+                local candidate="$1"
+                if [[ -z "$candidate" || "$candidate" != /nix/store/* ]]; then
+                  return 0
+                fi
+                candidate="$(readlink -f "$candidate")"
+                if [[ ! -e "$candidate" ]]; then
+                  return 0
+                fi
+                store_roots+=("$(normalize_store_root "$candidate")")
+              }
+
               declare -a bwrap_args=(
                 --unshare-all
                 --share-net
                 --die-with-parent
                 --new-session
-                --ro-bind /nix/store /nix/store
                 --proc /proc
                 --dev /dev
+                --dir /nix
+                --dir /nix/store
                 --dir /bin
                 --dir /etc
                 --symlink ${pkgs.bash}/bin/bash /bin/sh
@@ -860,14 +981,36 @@ PY
 
               resolved_editor="$(resolve_host_editor_cmd "''${EDITOR:-}")"
               if [[ -n "$resolved_editor" ]]; then
+                add_store_root "''${resolved_editor%% *}"
                 bwrap_args+=(--setenv EDITOR "$resolved_editor")
               fi
 
               resolved_visual="$(resolve_host_editor_cmd "''${VISUAL:-}")"
               if [[ -n "$resolved_visual" ]]; then
+                add_store_root "''${resolved_visual%% *}"
                 bwrap_args+=(--setenv VISUAL "$resolved_visual")
               fi
 
+              declare -a store_bind_args=()
+              declare -A seen_store_paths=()
+              add_store_bind_path() {
+                local path="$1"
+                if [[ -z "$path" || ! -e "$path" || -n "''${seen_store_paths[$path]:-}" ]]; then
+                  return 0
+                fi
+                seen_store_paths["$path"]=1
+                store_bind_args+=(--ro-bind "$path" "$path")
+              }
+
+              if [[ "''${#store_roots[@]}" -gt 0 ]]; then
+                while IFS= read -r store_path; do
+                  if [[ -n "$store_path" ]]; then
+                    add_store_bind_path "$store_path"
+                  fi
+                done < <(${pkgs.nix}/bin/nix-store --query --requisites "''${store_roots[@]}")
+              fi
+
+              bwrap_args+=("''${store_bind_args[@]}")
               bwrap_args+=("''${bind_args[@]}")
 
               ${pkgs.bubblewrap}/bin/bwrap \
@@ -890,8 +1033,6 @@ PY
             cog = self.lib.${final.system}.mkCogitator { };
           in {
             cogitator = cog.piSandbox;
-            cogitator-pi = cog.piPkg;
-            cogitator-pi-base = cog.piBasePkg;
             cogitator-init-project = cog.cogitatorInitProject;
             cogitatorLib = {
               mkCogitator = self.lib.${final.system}.mkCogitator;
@@ -903,10 +1044,6 @@ PY
           cogi = defaultCogitator.piSandbox;
           cogitator = defaultCogitator.piSandbox;
           cogitator-init-project = defaultCogitator.cogitatorInitProject;
-          cogitator-pi = defaultCogitator.piPkg;
-          cogitator-pi-base = defaultCogitator.piBasePkg;
-          pi = defaultCogitator.piPkg;
-          pi-base = defaultCogitator.piBasePkg;
           pi-sandbox = defaultCogitator.piSandbox;
         };
 
@@ -922,14 +1059,6 @@ PY
           cogitator-init-project = {
             type = "app";
             program = "${defaultCogitator.cogitatorInitProject}/bin/cogitator-init-project";
-          };
-          pi = {
-            type = "app";
-            program = "${defaultCogitator.piPkg}/bin/pi";
-          };
-          pi-base = {
-            type = "app";
-            program = "${defaultCogitator.piBasePkg}/bin/pi";
           };
           pi-sandbox = {
             type = "app";

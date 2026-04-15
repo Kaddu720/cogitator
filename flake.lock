@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "caveman": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1776257424,
+        "narHash": "sha256-m7HhCW4fXU5pIYRWVP6cvSYUkDHt8R90D9UI3tT7euk=",
+        "ref": "refs/heads/main",
+        "rev": "c2ed24b3e5d412cd0c25197b2bc9af587621fd99",
+        "revCount": 140,
+        "type": "git",
+        "url": "https://github.com/JuliusBrussee/caveman.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://github.com/JuliusBrussee/caveman.git"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -34,10 +50,28 @@
         "type": "github"
       }
     },
+    "pi-web-access": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1775268893,
+        "narHash": "sha256-OA1UpLXMV/g5CQgf03KwOjCoa34a32/Itwx8GePw2fk=",
+        "ref": "refs/heads/main",
+        "rev": "b378e5d80d424806058e819b262f72e5f6b58b7d",
+        "revCount": 30,
+        "type": "git",
+        "url": "https://github.com/nicobailon/pi-web-access.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://github.com/nicobailon/pi-web-access.git"
+      }
+    },
     "root": {
       "inputs": {
+        "caveman": "caveman",
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "pi-web-access": "pi-web-access"
       }
     },
     "systems": {
