@@ -3,11 +3,11 @@
     "caveman": {
       "flake": false,
       "locked": {
-        "lastModified": 1776257424,
-        "narHash": "sha256-m7HhCW4fXU5pIYRWVP6cvSYUkDHt8R90D9UI3tT7euk=",
+        "lastModified": 1776507098,
+        "narHash": "sha256-M+NoWXxrhtbkbe/lmq7P0/KpmqOZzJjhgeUVjY+7N2k=",
         "ref": "refs/heads/main",
-        "rev": "c2ed24b3e5d412cd0c25197b2bc9af587621fd99",
-        "revCount": 140,
+        "rev": "84cc3c14fa1e10182adaced856e003406ccd250d",
+        "revCount": 141,
         "type": "git",
         "url": "https://github.com/JuliusBrussee/caveman.git"
       },
