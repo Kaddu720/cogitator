@@ -1,6 +1,6 @@
 # cogitator
 
-Sandboxed `pi` launcher for NixOS using `bubblewrap`, plus a bundled workflow-mode extension for project-aware sessions.
+Sandboxed `pi` launcher for Linux using `bubblewrap`, with a macOS Seatbelt (`sandbox-exec`) path, plus a bundled workflow-mode extension for project-aware sessions.
 
 ## Documentation
 
@@ -14,8 +14,10 @@ Detailed reference docs live in `docs/`:
 
 ## What this flake provides
 
-- `cogi` for Level 2-style sandboxing on NixOS
+- `cogi` for Level 2-style sandboxing on Linux via `bubblewrap` and on macOS via Seatbelt (`/usr/bin/sandbox-exec`)
+- flake-provided runtime tools on both platforms, including `git`, `gh`, `ffmpeg`, `yt-dlp`, `node`, and `python`
 - `cogitator-init-project` to bootstrap a project in the control root
+- platform-specific isolation semantics: Linux uses namespace/bind-mount sandboxing, while macOS uses policy-based file/network restrictions
 - an overlay exposing:
   - `pkgs.cogitator`
   - `pkgs.cogitator-init-project`
@@ -32,6 +34,13 @@ Detailed reference docs live in `docs/`:
 - plan mode that keeps repo/code work read-only while still allowing project state + artifact updates
 - explicit blocking of the `sops` command
 - stronger secret handling using protected mounted secret files and in-memory provider registration
+
+## Platform notes
+
+- Linux keeps the existing `bubblewrap` sandbox model with a synthetic filesystem view and read-only `/nix/store`.
+- macOS runs `pi` under Apple Seatbelt with a generated temporary sandbox profile via `/usr/bin/sandbox-exec`.
+- The macOS path is intentionally narrower in scope than Linux `bubblewrap`: it is policy-based isolation, not namespace-based filesystem virtualization.
+- On macOS, expect some tool-specific edge cases around file watchers, subprocess behavior, Mach services, and network policy details.
 
 ## Registry layout
 

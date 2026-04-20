@@ -23,6 +23,8 @@
       let
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
+        isLinux = pkgs.stdenv.isLinux;
+        isDarwin = pkgs.stdenv.isDarwin;
 
         defaultControlRoot = "/home/kaddu/.local/share/cogitator";
         workflowExtension = ./extensions/workflow-mode.ts;
@@ -134,7 +136,7 @@ EOF
             map (
               binding: ''
                 if [[ -f ${lib.escapeShellArg binding.source} ]]; then
-                  resolved_source="$(readlink -f ${lib.escapeShellArg binding.source})"
+                  resolved_source="$(resolve_path ${lib.escapeShellArg binding.source})"
                   if [[ -f "$resolved_source" ]]; then
                     bind_args+=(--ro-bind "$resolved_source" ${lib.escapeShellArg binding.target})
                   fi
@@ -146,12 +148,27 @@ EOF
         mkSecretBindings = secretFiles:
           lib.mapAttrsToList (name: path: {
             source = toString path;
-            target = "/run/cogitator-secrets/${name}";
+            target = "/tmp/cogitator-pi-agent/secrets/${name}";
           }) secretFiles;
+
+        renderSecretStagingLines = bindings:
+          lib.concatStringsSep "\n" (
+            map (
+              binding: ''
+                if [[ -f ${lib.escapeShellArg binding.source} ]]; then
+                  resolved_source="$(resolve_path ${lib.escapeShellArg binding.source})"
+                  if [[ -f "$resolved_source" ]]; then
+                    cp "$resolved_source" "$agent_secrets_dir/${baseNameOf binding.target}"
+                    chmod 600 "$agent_secrets_dir/${baseNameOf binding.target}"
+                  fi
+                fi
+              ''
+            ) bindings
+          );
 
         mkPiProviderAuthAttrs = providerId: cfg:
           let
-            mountedApiKey = "!cat /run/cogitator-secrets/provider-${providerId}.key";
+            mountedApiKey = "!cat \"$PI_CODING_AGENT_DIR/secrets/provider-${providerId}.key\"";
             authCfg = cfg.auth or null;
           in
             if authCfg == null
@@ -236,13 +253,15 @@ EOF
                 gh
                 ripgrep
                 fd
-                bubblewrap
                 cacert
                 ffmpeg
                 yt-dlp
-                xdg-utils
                 nodejs_22
                 python3
+              ])
+              ++ lib.optionals isLinux (with pkgs; [
+                bubblewrap
+                xdg-utils
               ])
               ++ extraRuntimeTools;
 
@@ -480,6 +499,7 @@ EOF
 
             piSandbox = pkgs.writeShellScriptBin "cogi" ''
               set -euo pipefail
+              export PATH="${runtimePath}:''${PATH:-}"
 
               usage() {
                 cat <<'EOF'
@@ -557,6 +577,14 @@ EOF
                 esac
               done
 
+              resolve_path() {
+                ${pkgs.python3}/bin/python - <<'PY' "$1"
+import os
+import sys
+print(os.path.realpath(sys.argv[1]))
+PY
+              }
+
               mkdir -p "$control_root/projects"
 
               gitignore_path="$control_root/.gitignore"
@@ -564,8 +592,8 @@ EOF
                 cp ${controlRootGitignore} "$gitignore_path"
               fi
 
-              workspace="$(readlink -f "$workspace")"
-              control_root="$(readlink -f "$control_root")"
+              workspace="$(resolve_path "$workspace")"
+              control_root="$(resolve_path "$control_root")"
 
               if [[ ! -d "$workspace" ]]; then
                 echo "Workspace does not exist or is not a directory: $workspace" >&2
@@ -593,7 +621,7 @@ PY
               host_pi_keybindings_json=""
               if [[ -n "${HOME:-}" ]]; then
                 mkdir -p "$HOME/.pi/agent"
-                host_pi_agent_dir="$(readlink -f "$HOME/.pi/agent")"
+                host_pi_agent_dir="$(resolve_path "$HOME/.pi/agent")"
                 host_pi_settings_json="$host_pi_agent_dir/settings.json"
                 host_pi_models_json="$host_pi_agent_dir/models.json"
                 host_pi_auth_json="$host_pi_agent_dir/auth.json"
@@ -604,7 +632,11 @@ PY
               fi
 
               agent_dir_host="$(mktemp -d)"
-              trap 'if [[ -n "$host_pi_auth_json" && -e "$agent_dir_host/auth.json" ]]; then cp "$agent_dir_host/auth.json" "$host_pi_auth_json"; fi; rm -rf "$agent_dir_host"' EXIT
+              agent_secrets_dir="$agent_dir_host/secrets"
+              mkdir -p "$agent_secrets_dir"
+              seatbelt_profile=""
+              trap 'if [[ -n "$host_pi_auth_json" && -e "$agent_dir_host/auth.json" ]]; then cp "$agent_dir_host/auth.json" "$host_pi_auth_json"; fi; if [[ -n "$seatbelt_profile" && -e "$seatbelt_profile" ]]; then rm -f "$seatbelt_profile"; fi; rm -rf "$agent_dir_host"' EXIT
+${renderSecretStagingLines secretBindings}
               cat > "$agent_dir_host/cogitator-models.json" <<'EOF'
 ${builtins.toJSON piModelsConfig}
 EOF
@@ -788,7 +820,7 @@ PY
                   src="$spec"
                   dest="$spec"
                 fi
-                src="$(readlink -f "$src")"
+                src="$(resolve_path "$src")"
                 if [[ ! -e "$src" ]]; then
                   echo "Bind source does not exist: $src" >&2
                   exit 1
@@ -887,14 +919,12 @@ PY
 
               for etc_name in hosts resolv.conf nsswitch.conf; do
                 if [[ -e "/etc/$etc_name" ]]; then
-                  resolved_etc="$(readlink -f "/etc/$etc_name")"
+                  resolved_etc="$(resolve_path "/etc/$etc_name")"
                   if [[ -e "$resolved_etc" ]]; then
                     bind_args+=(--ro-bind "$resolved_etc" "/etc/$etc_name")
                   fi
                 fi
               done
-
-              ${renderReadonlyBindLines secretBindings}
 
               for spec in "''${extra_ro_binds[@]}"; do
                 add_bind --ro-bind "$spec"
@@ -921,7 +951,7 @@ PY
                 if [[ -z "$candidate" || "$candidate" != /nix/store/* ]]; then
                   return 0
                 fi
-                candidate="$(readlink -f "$candidate")"
+                candidate="$(resolve_path "$candidate")"
                 if [[ ! -e "$candidate" ]]; then
                   return 0
                 fi
@@ -977,13 +1007,13 @@ PY
                 local resolved_bin=""
                 if [[ "$editor_bin" == */* ]]; then
                   if [[ -e "$editor_bin" ]]; then
-                    resolved_bin="$(readlink -f "$editor_bin")"
+                    resolved_bin="$(resolve_path "$editor_bin")"
                   fi
                 else
                   local host_editor_path=""
                   host_editor_path="$(command -v "$editor_bin" 2>/dev/null || true)"
                   if [[ -n "$host_editor_path" && -e "$host_editor_path" ]]; then
-                    resolved_bin="$(readlink -f "$host_editor_path")"
+                    resolved_bin="$(resolve_path "$host_editor_path")"
                   fi
                 fi
 
@@ -1028,10 +1058,152 @@ PY
               bwrap_args+=("''${store_bind_args[@]}")
               bwrap_args+=("''${bind_args[@]}")
 
+${lib.optionalString isLinux ''
               ${pkgs.bubblewrap}/bin/bwrap \
                 "''${bwrap_args[@]}" \
                 ${piPkg}/bin/pi \
                 "''${pi_args[@]}"
+''}${lib.optionalString isDarwin ''
+              if [[ ! -x /usr/bin/sandbox-exec ]]; then
+                echo "macOS sandbox-exec is required for Darwin isolation" >&2
+                exit 1
+              fi
+
+              validate_darwin_bind_spec() {
+                local spec="$1"
+                local src="$spec"
+                local dest="$spec"
+                if [[ "$spec" == *:* ]]; then
+                  src="''${spec%%:*}"
+                  dest="''${spec#*:}"
+                fi
+                src="$(resolve_path "$src")"
+                if [[ "$dest" != "$src" ]]; then
+                  echo "Darwin sandbox does not support remapped bind destinations: $spec" >&2
+                  exit 1
+                fi
+              }
+
+              for spec in "''${extra_ro_binds[@]}"; do
+                validate_darwin_bind_spec "$spec"
+              done
+              for spec in "''${extra_rw_binds[@]}"; do
+                validate_darwin_bind_spec "$spec"
+              done
+
+              sandbox_home="$agent_dir_host/home"
+              sandbox_tmp="$agent_dir_host/tmp"
+              seatbelt_profile="$agent_dir_host/cogitator-seatbelt.sb"
+              mkdir -p "$sandbox_home" "$sandbox_tmp"
+
+              seatbelt_json_quote() {
+                ${pkgs.python3}/bin/python - <<'PY' "$1"
+import json
+import sys
+print(json.dumps(sys.argv[1]))
+PY
+              }
+
+              seatbelt_emit_subpath() {
+                local path="$1"
+                if [[ -z "$path" || ! -e "$path" ]]; then
+                  return 0
+                fi
+                path="$(resolve_path "$path")"
+                printf '  (subpath %s)\n' "$(seatbelt_json_quote "$path")"
+              }
+
+              seatbelt_emit_spec_source() {
+                local spec="$1"
+                local src="$spec"
+                if [[ "$src" == *:* ]]; then
+                  src="''${src%%:*}"
+                fi
+                seatbelt_emit_subpath "$src"
+              }
+
+              {
+                echo '(version 1)'
+                echo '(deny default)'
+                echo '(import "system.sb")'
+                echo '(allow process*)'
+                echo '(allow sysctl-read)'
+                echo '(allow network*)'
+                echo '(allow file-read*'
+                seatbelt_emit_subpath '/nix/store'
+                seatbelt_emit_subpath '/System'
+                seatbelt_emit_subpath '/Library'
+                seatbelt_emit_subpath '/usr'
+                seatbelt_emit_subpath '/bin'
+                seatbelt_emit_subpath '/sbin'
+                seatbelt_emit_subpath '/etc'
+                seatbelt_emit_subpath '/private/etc'
+                seatbelt_emit_subpath '/var'
+                seatbelt_emit_subpath '/private/var'
+                seatbelt_emit_subpath '/dev'
+                seatbelt_emit_subpath '/Applications'
+                seatbelt_emit_subpath '/opt'
+                seatbelt_emit_subpath '/opt/homebrew'
+                seatbelt_emit_subpath '/private/tmp'
+                seatbelt_emit_subpath '/tmp'
+                seatbelt_emit_subpath "$agent_dir_host"
+                seatbelt_emit_subpath "$workspace"
+                seatbelt_emit_subpath "$control_root"
+                seatbelt_emit_subpath "$sessions_root"
+                seatbelt_emit_subpath "$session_dir"
+                if [[ -n "$resolved_editor" ]]; then
+                  seatbelt_emit_subpath "''${resolved_editor%% *}"
+                fi
+                if [[ -n "$resolved_visual" ]]; then
+                  seatbelt_emit_subpath "''${resolved_visual%% *}"
+                fi
+                for repo_path in "''${!mounted_repo_paths[@]}"; do
+                  seatbelt_emit_subpath "$repo_path"
+                done
+                for spec in "''${extra_ro_binds[@]}"; do
+                  seatbelt_emit_spec_source "$spec"
+                done
+                for spec in "''${extra_rw_binds[@]}"; do
+                  seatbelt_emit_spec_source "$spec"
+                done
+                echo ')'
+                echo '(allow file-write*'
+                seatbelt_emit_subpath "$agent_dir_host"
+                seatbelt_emit_subpath "$sandbox_home"
+                seatbelt_emit_subpath "$sandbox_tmp"
+                seatbelt_emit_subpath "$workspace"
+                seatbelt_emit_subpath "$control_root"
+                seatbelt_emit_subpath "$sessions_root"
+                seatbelt_emit_subpath "$session_dir"
+                for repo_path in "''${!mounted_repo_paths[@]}"; do
+                  seatbelt_emit_subpath "$repo_path"
+                done
+                for spec in "''${extra_rw_binds[@]}"; do
+                  seatbelt_emit_spec_source "$spec"
+                done
+                echo ')'
+              } > "$seatbelt_profile"
+              chmod 600 "$seatbelt_profile"
+
+              export HOME="$sandbox_home"
+              export TMPDIR="$sandbox_tmp"
+              export TMP="$sandbox_tmp"
+              export TEMP="$sandbox_tmp"
+              export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              export NIX_SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              export PI_SKIP_VERSION_CHECK=1
+              export PI_CODING_AGENT_DIR="$agent_dir_host"
+              export COGITATOR_CONTROL_ROOT="$control_root"
+              if [[ -n "$project_id" ]]; then
+                export COGITATOR_PROJECT_ID="$project_id"
+              fi
+
+              cd "$workspace"
+              /usr/bin/sandbox-exec -f "$seatbelt_profile" ${piPkg}/bin/pi "''${pi_args[@]}"
+''}${lib.optionalString (!isLinux && !isDarwin) ''
+              echo "Unsupported system: ${system}" >&2
+              exit 1
+''}
             '';
           in {
             inherit cogitatorInitProject piBasePkg piPkg piSandbox runtimePath runtimeTools;

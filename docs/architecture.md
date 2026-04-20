@@ -65,7 +65,11 @@ interface WorkflowRuntimeState {
 
 ## Sandbox model
 
-`cogi` uses `bubblewrap` (`bwrap`) to create a sandboxed environment:
+`cogi` uses a platform-specific OS sandbox:
+
+### Linux
+
+On Linux, `cogi` uses `bubblewrap` (`bwrap`) to create a sandboxed environment:
 
 - `/nix/store` mounted read-only
 - Workspace and linked repos mounted read-write
@@ -74,3 +78,17 @@ interface WorkflowRuntimeState {
 - Private `/tmp`
 - Network disabled by default (use `--net` to enable)
 - Host `~/.pi/agent` config imported but full `~/.pi` not exposed
+
+### macOS
+
+On macOS, `cogi` generates a temporary Seatbelt profile and runs `pi` via `/usr/bin/sandbox-exec`:
+
+- File access is policy-based rather than namespace-based
+- Workspace, linked repos, control root, sessions, and generated agent files are explicitly allowed
+- `HOME` and `TMPDIR` are redirected into a temporary runtime directory
+- The sandbox can restrict reads and writes, but it does not provide Linux-style bind-mount filesystem virtualization
+- Host `~/.pi/agent` config is still merged into generated runtime files without exposing the full host `~/.pi`
+
+### Isolation caveat
+
+The Linux and macOS sandboxes are not equivalent. Linux provides stronger filesystem-shaping semantics through namespaces and bind mounts; macOS Seatbelt provides policy enforcement with different compatibility and observability tradeoffs.
