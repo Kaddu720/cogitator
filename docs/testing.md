@@ -2,19 +2,24 @@
 
 ## Running unit tests
 
+The flake provides the pi packages the extensions import, so the tests run without
+a manual `npm install`. From the repo root:
+
 ```bash
-npx tsx extensions/tests/unit.ts
+nix run .#test          # runs extensions/tests/unit.ts against the working tree
 ```
 
-If `tsx` is not available, add it to `flake.nix` by creating a `devShells.default` output:
+Or use the dev shell (`nodejs_24`, `tsx`, and a `cogitator-test` command):
 
-```nix
-devShells.default = pkgs.mkShell {
-  packages = [ pkgs.nodePackages.tsx ];
-};
+```bash
+nix develop
+cogitator-test
 ```
 
-Then enter the dev shell with `nix develop` before running tests.
+Both stage a `node_modules` tree with `@earendil-works/pi-coding-agent` (+ nested
+`pi-ai`/`pi-tui`/`pi-agent-core`) and set `"type": "module"` so Node loads the
+ESM-only `pi-ai`; `tsx` resolves the `.js`-specifier `.ts` files. The runner exits
+non-zero on any failure.
 
 ## Test structure
 

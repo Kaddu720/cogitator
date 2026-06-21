@@ -1,5 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { BorderedLoader, createBashTool } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { type Mode, persistMode, restoreMode, persistProjectSelection, restoreStoredProjectId } from "./runtime.js";
@@ -7,28 +7,17 @@ import { registerCommands, type CommandHandlers, type ShortcutHandlers } from ".
 import { registerHooks, type HookHandlers } from "./hooks.js";
 import {
   type ProjectRecord,
-  type NewProjectWizardResult,
-  getControlRoot,
-  getProjectsRoot,
+  getProjectStatesDir,
   getResolutionBase,
   resolveFrom,
   isSameOrWithin,
   fileExists,
   slugifyProjectId,
-  titleizeProjectId,
-  parseMultilineList,
-  inferRepoName,
   getProjectStatePath,
   getProjectArtifactsPath,
   isApprovalExemptPath,
-  matchesRepo,
-  isRepoPathVisibleInSession,
   loadProjects,
-  createProjectScaffold,
-  deleteProjectScaffold,
-  buildInitialStateMarkdownWithModel,
   buildProjectContext,
-  updateProjectMetadata,
 } from "./projects.js";
 import {
   type WeeklySummaryState,
@@ -69,7 +58,6 @@ import {
 } from "./approvals/actions.js";
 import {
   JIRA_TMP_PREFIX,
-  loadProtectedPaths,
   getModeTools,
   getModeDescriptor,
   getReadAccessPolicy,
@@ -88,6 +76,7 @@ import {
   SECRET_SAFETY_PROMPT_PATH,
   PROJECT_CONTEXT_GUIDANCE_PROMPT_PATH,
   TARGETED_FILE_ACCESS_PROMPT_PATH,
+  COMPUTE_IN_VM_PROMPT_PATH,
 } from "./resources.js";
 
 // ─── Helpers retained in workflow-mode ─────────────────────────────────────────
@@ -102,19 +91,6 @@ async function getGitRoot(start: string | undefined): Promise<string | undefined
   }
 }
 
-function pathTouchesProtectedPath(path: string, protectedPaths: string[]): boolean {
-  return protectedPaths.some((p) => isSameOrWithin(path, p));
-}
-function commandTouchesProtectedPath(command: string, protectedPaths: string[]): boolean {
-  return protectedPaths.some((p) => command.includes(p));
-}
-
-function getToolInputPath(event: { toolName: string; input: Record<string, unknown> }): string | undefined {
-  if (["read", "write", "edit", "grep", "find", "ls"].includes(event.toolName)) {
-    return typeof event.input.path === "string" ? event.input.path : undefined;
-  }
-  return undefined;
-}
 
 function describeMutation(event: { toolName: string; input: Record<string, unknown> }): string | undefined {
   if (event.toolName === "write") { const c = typeof event.input.content === "string" ? event.input.content : ""; return `write ${c.length} byte(s)`; }
@@ -153,7 +129,6 @@ interface WorkflowRuntimeState {
 // ─── Extension entry point ──────────────────────────────────────────────────────
 
 export default function workflowModeExtension(pi: ExtensionAPI): void {
-  const protectedPaths = loadProtectedPaths();
   const planResearchTools = ["web_search", "fetch_content", "get_search_content", "code_search"];
   let baseTools: string[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
   const state: WorkflowRuntimeState = {
@@ -467,22 +442,21 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
   async function selectProject(ctx: ExtensionContext, promptTitle = "Select project for this session"): Promise<void> {
     const projects = await loadProjects();
     state.activeRepoRoot = await getGitRoot(ctx.cwd);
-    const repoProjects = projects
-      .filter((p) => matchesRepo(p, state.activeRepoRoot));
 
     const NEW_PROJECT = "+ New project…";
     const NO_PROJECT = "No project";
 
-    const options = repoProjects.map((p) => `(${p.id}) ${p.name}`);
+    // INDEX.md order (active first); no repo matching in the markdown-first model.
+    const options = projects.map((p) => `(${p.id}) ${p.name}${p.status ? ` · ${p.status}` : ""}`);
     options.push(NEW_PROJECT, NO_PROJECT);
 
-    if (!ctx.hasUI) { await setActiveProject(repoProjects[0] ?? null, ctx, false); return; }
+    if (!ctx.hasUI) { await setActiveProject(null, ctx, false); return; }
 
     const choice = await ctx.ui.select(promptTitle, options);
     if (choice === NEW_PROJECT) { await commandHandlers["new-project"]("", ctx); return; }
     if (!choice || choice === NO_PROJECT) { await setActiveProject(null, ctx); return; }
     const index = options.indexOf(choice);
-    await setActiveProject(repoProjects[index] ?? null, ctx);
+    await setActiveProject(projects[index] ?? null, ctx);
   }
 
   // ─── Command handler implementations ─────────────────────────────────────────
@@ -493,146 +467,39 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     "new-project": async (args, ctx) => {
       if (!ctx.hasUI) return;
       const seed = typeof args === "string" ? args.trim() : Array.isArray(args) && args.every((e) => typeof e === "string") ? args.join(" ").trim() : "";
-      const seededId = slugifyProjectId(seed);
-      const projectIdInput = ((await ctx.ui.input("New project", `Project id (kebab-case)${seededId ? ` [${seededId}]` : ""}`)) ?? "").trim();
-      const projectId = slugifyProjectId(projectIdInput || seededId);
-      if (!projectId) { ctx.ui.notify("Project creation cancelled: a valid project id is required.", "warning"); return; }
-      const existingProjects = await loadProjects();
-      if (existingProjects.some((p) => p.id === projectId)) { ctx.ui.notify(`Project already exists: ${projectId}`, "warning"); return; }
-      const defaultName = titleizeProjectId(projectId);
-      const projectName = ((await ctx.ui.input("Project title", `Human-readable project title [${defaultName}]`)) ?? "").trim() || defaultName;
-      const description = ((await ctx.ui.input("Description", "Describe this project in detail — the AI will use this to populate the state file")) ?? "").trim();
-      const defaultRepo = state.activeRepoRoot || getResolutionBase(ctx.cwd, state.activeRepoRoot);
-      const primaryRepoInput = ((await ctx.ui.input("Primary repo", `Primary repository path [${defaultRepo}]`)) ?? "").trim();
-      const primaryRepo = resolveFrom(ctx.cwd, normalizeInputPath(primaryRepoInput || defaultRepo), state.activeRepoRoot);
-      const additionalReposInput = ((await ctx.ui.input("Additional repos", "Additional repository paths, one per line or comma-separated")) ?? "").trim();
-      const repoPaths = [primaryRepo, ...parseMultilineList(additionalReposInput).map((p) => resolveFrom(ctx.cwd, normalizeInputPath(p), state.activeRepoRoot))].filter((p) => p.length > 0).filter((p, i, v) => v.indexOf(p) === i);
-      const project: NewProjectWizardResult = {
-        id: projectId,
-        name: projectName,
-        description: description || undefined,
-        repos: repoPaths.map((p, i) => ({ path: p, name: inferRepoName(p), role: i === 0 ? "primary" : "supporting" })),
-      };
-      try {
-        let initialStateOptions = {};
-        if (ctx.model) {
-          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-          const hasHeaders = !!auth.headers && Object.keys(auth.headers).length > 0;
-          if (auth.ok && (auth.apiKey || hasHeaders)) {
-            initialStateOptions = { model: ctx.model, apiKey: auth.apiKey, headers: auth.headers, signal: ctx.signal };
-          }
-        }
+      const projectName = (((await ctx.ui.input("New project", "Project title / name")) ?? "").trim()) || seed;
+      if (!projectName) { ctx.ui.notify("Project creation cancelled: a project name is required.", "warning"); return; }
+      const suggestedSlug = slugifyProjectId(projectName);
+      const existing = await loadProjects();
+      const slugCollision = existing.some((p) => p.id === suggestedSlug);
+      const description = ((await ctx.ui.input("Description", "Short description / scope (optional)")) ?? "").trim();
+      const jiraKey = ((await ctx.ui.input("Jira key", "Jira issue key, e.g. SRE-1234 (optional)")) ?? "").trim();
 
-        const created = await createProjectScaffold(project);
-        const loaderLabel = ctx.model && "model" in initialStateOptions
-          ? `Generating initial project state with ${ctx.model.id}...`
-          : "Generating initial project state...";
-        const generatedState = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-          const loader = new BorderedLoader(tui, theme, loaderLabel);
-          loader.onAbort = () => done(null);
+      // Delegate file creation + INDEX.md update to the new-project skill so the
+      // agent follows the project-state conventions (template + INDEX section).
+      const directive = [
+        "Run the new-project skill to scaffold a new project and register it. Inputs:",
+        `- Project name: ${projectName}`,
+        `- Suggested slug: ${suggestedSlug}${slugCollision ? " (a state file with this slug already exists — pick a distinct slug)" : ""}`,
+        `- Description / scope: ${description || "(none provided — infer a brief scope or leave a clear placeholder)"}`,
+        `- Jira key: ${jiraKey || "(none)"}`,
+        `- Project states directory: ${getProjectStatesDir()}`,
+        "Create <project states directory>/<slug>.md from the standard project-state template, add an INDEX.md row under the appropriate section, then report the new slug so it can be loaded with /project.",
+      ].join("\n");
 
-          const doGenerate = async () => {
-            const stateOptions = "model" in initialStateOptions ? { ...initialStateOptions, signal: loader.signal } : initialStateOptions;
-            return await buildInitialStateMarkdownWithModel(project, stateOptions);
-          };
-
-          doGenerate()
-            .then(done)
-            .catch(() => done(null));
-
-          return loader;
-        });
-        if (generatedState === null) {
-          ctx.ui.notify(`Project scaffold created for (${created.id}) ${created.name}, but initial state generation was cancelled before the final draft was written.`, "warning");
-          return;
-        }
-        await writeFile(getProjectStatePath(created), generatedState, "utf8");
-        await setActiveProject(created, ctx, false);
-        const lines = [`Created project: (${created.id}) ${created.name}`, `State: ${getProjectStatePath(created)}`, `Artifacts: ${getProjectArtifactsPath(created)}`, "The new project is now active for this session."];
-        if (ctx.model && "model" in initialStateOptions) lines.push(`Initial state drafted with model: ${ctx.model.id}`);
-        else lines.push("Initial state used deterministic scaffolding because no model/auth was available.");
-        if (created.repos.some((r) => !isRepoPathVisibleInSession(r.path, state.activeRepoRoot))) lines.push("Restart cogi to mount any newly linked repositories into the sandbox.");
-        ctx.ui.notify(lines.join("\n"), "success");
-      } catch (error) { ctx.ui.notify(`Failed to create project: ${String(error)}`, "warning"); }
+      ctx.ui.notify(`Starting the new-project skill for "${projectName}"…`, "info");
+      if (ctx.isIdle()) pi.sendUserMessage(directive);
+      else pi.sendUserMessage(directive, { deliverAs: "followUp" });
     },
 
     "project-status": async (_args, ctx) => {
-      const lines = [`Mode: ${state.currentMode}`, `Control root: ${getControlRoot()}`];
+      const lines = [`Mode: ${state.currentMode}`, `Project states: ${getProjectStatesDir()}`];
       if (state.activeRepoRoot) lines.push(`Repo root: ${state.activeRepoRoot}`);
-      if (state.activeProject) { lines.push(`Project: (${state.activeProject.id}) ${state.activeProject.name}`); lines.push(`State: ${getProjectStatePath(state.activeProject)}`); lines.push(`Artifacts: ${getProjectArtifactsPath(state.activeProject)}`); }
+      if (state.activeProject) { lines.push(`Project: (${state.activeProject.id}) ${state.activeProject.name}${state.activeProject.status ? ` · ${state.activeProject.status}` : ""}`); lines.push(`State: ${getProjectStatePath(state.activeProject)}`); lines.push(`Artifacts: ${getProjectArtifactsPath(state.activeProject)}`); }
       else { lines.push("Project: none"); }
       const needingApproval = getPendingApprovalProposals(approvalDeps);
       if (needingApproval.length > 0) { lines.push(`Pending approvals: ${needingApproval.length}`); for (const p of needingApproval) lines.push(`- Change ${p.index}/${p.total}: ${p.file} — ${p.proposedEdit} [${p.status}]`); }
       if (ctx.hasUI) ctx.ui.notify(lines.join("\n"), "info");
-    },
-
-    "add-repo": async (args, ctx) => {
-      if (!state.activeProject) { if (ctx.hasUI) ctx.ui.notify("Load a project first with /project before adding a linked repo.", "warning"); return; }
-      const suppliedPath = Array.isArray(args) && args.every((e) => typeof e === "string") ? args.join(" ").trim() : "";
-      const rawPath = suppliedPath || (ctx.hasUI ? ((await ctx.ui.input("Add linked repo", "Repository path to add to this project")) ?? "").trim() : "");
-      if (!rawPath) return;
-      const resolvedRepoPath = resolveFrom(ctx.cwd, normalizeInputPath(rawPath), state.activeRepoRoot);
-      if (state.activeProject.repos.some((r) => resolve(r.path) === resolvedRepoPath)) { if (ctx.hasUI) ctx.ui.notify(`Repo already linked to this project: ${resolvedRepoPath}`, "info"); return; }
-      const updatedProject: ProjectRecord = await updateProjectMetadata(state.activeProject, {
-        repos: [...state.activeProject.repos, { path: resolvedRepoPath }],
-      });
-      await setActiveProject(updatedProject, ctx, false);
-      if (ctx.hasUI) ctx.ui.notify([`Added linked repo to (${updatedProject.id}) ${updatedProject.name}: ${resolvedRepoPath}`, "Restart cogi to mount the new repository into the sandbox."].join("\n"), "success");
-    },
-
-    "delete-project": async (args, ctx) => {
-      const suppliedId = typeof args === "string"
-        ? args.trim()
-        : Array.isArray(args) && args.every((e) => typeof e === "string")
-          ? args.join(" ").trim()
-          : "";
-      const projects = await loadProjects();
-      if (projects.length === 0) { if (ctx.hasUI) ctx.ui.notify("No projects are available to delete.", "info"); return; }
-
-      let projectToDelete: ProjectRecord | undefined;
-      if (suppliedId) {
-        const normalized = slugifyProjectId(suppliedId);
-        projectToDelete = projects.find((p) => p.id === normalized || p.name === suppliedId);
-        if (!projectToDelete) { if (ctx.hasUI) ctx.ui.notify(`Project not found: ${suppliedId}`, "warning"); return; }
-      } else if (state.activeProject) {
-        projectToDelete = state.activeProject;
-      } else if (ctx.hasUI) {
-        const options = projects.map((p) => `(${p.id}) ${p.name}`);
-        const choice = await ctx.ui.select("Delete project", options);
-        if (!choice) return;
-        const index = options.indexOf(choice);
-        projectToDelete = projects[index];
-      }
-
-      if (!projectToDelete) { if (ctx.hasUI) ctx.ui.notify("No project selected for deletion.", "warning"); return; }
-
-      if (ctx.hasUI) {
-        const confirmation = await ctx.ui.select(
-          `Delete (${projectToDelete.id}) ${projectToDelete.name}? This removes only the Cogitator project scaffold.`,
-          ["Cancel", `Delete project (${projectToDelete.id})`],
-        );
-        if (confirmation !== `Delete project (${projectToDelete.id})`) {
-          ctx.ui.notify("Project deletion cancelled.", "info");
-          return;
-        }
-
-        const typedConfirmation = ((await ctx.ui.input(
-          "Type project id to confirm deletion",
-          `Type ${projectToDelete.id} to permanently delete this project scaffold`,
-        )) ?? "").trim();
-        if (typedConfirmation !== projectToDelete.id) {
-          ctx.ui.notify(`Project deletion cancelled: expected '${projectToDelete.id}'.`, "info");
-          return;
-        }
-      }
-
-      try {
-        await deleteProjectScaffold(projectToDelete);
-        if (state.activeProject?.id === projectToDelete.id) await setActiveProject(null, ctx, false);
-        if (ctx.hasUI) ctx.ui.notify(`Deleted project: (${projectToDelete.id}) ${projectToDelete.name}\nRemoved: ${projectToDelete.dir}\nLinked repositories were not modified.`, "success");
-      } catch (error) {
-        if (ctx.hasUI) ctx.ui.notify(`Failed to delete project: ${String(error)}`, "warning");
-      }
     },
 
     "weekly-summary": async (_args, ctx) => {
@@ -777,7 +644,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     },
 
     before_agent_start: async (event) => {
-      const additions: string[] = [await readPromptFragment(CHANGE_PROPOSAL_WORKFLOW_PROMPT_PATH), await readPromptFragment(SECRET_SAFETY_PROMPT_PATH), await readPromptFragment(TARGETED_FILE_ACCESS_PROMPT_PATH)];
+      const additions: string[] = [await readPromptFragment(CHANGE_PROPOSAL_WORKFLOW_PROMPT_PATH), await readPromptFragment(SECRET_SAFETY_PROMPT_PATH), await readPromptFragment(TARGETED_FILE_ACCESS_PROMPT_PATH), await readPromptFragment(COMPUTE_IN_VM_PROMPT_PATH)];
       const modeDescriptor = getModeDescriptor(state.currentMode);
       additions.push(await readPromptFragment(modeDescriptor.promptPath));
       if (modeDescriptor.writePolicy.projectScopeOnly && state.activeProject) {
@@ -822,12 +689,6 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         if (event.toolName === "bash") {
           const command = String(event.input.command ?? "");
           if (/\bsops\b/i.test(command)) return { block: true, reason: "Access to the sops command is blocked." };
-          if (commandTouchesProtectedPath(command, protectedPaths)) return { block: true, reason: "Access to protected secret paths is blocked." };
-        }
-        const toolInputPath = getToolInputPath(event as { toolName: string; input: Record<string, unknown> });
-        if (toolInputPath) {
-          const resolvedToolPath = resolveFrom(ctx.cwd, normalizeInputPath(toolInputPath), state.activeRepoRoot);
-          if (pathTouchesProtectedPath(resolvedToolPath, protectedPaths)) return { block: true, reason: "Access to protected secret paths is blocked." };
         }
         const toolDescriptor = getModeDescriptor(state.currentMode);
         const isMutationTool = event.toolName === "write" || event.toolName === "edit";

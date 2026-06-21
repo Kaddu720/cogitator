@@ -9,7 +9,7 @@
  *                                                          → ../projects.ts
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type PendingProposal, type StoredApprovalGateState } from "./types.js";
 import { normalizePendingProposal } from "./parse.js";
 import { getResolutionBase } from "../projects.js";

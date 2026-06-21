@@ -39,11 +39,11 @@ When proposals form a sequence (e.g., Change 1/3, 2/3, 3/3), only the next unapp
 
 ## Approval-exempt paths
 
-The active project's `state.md` file is exempt from the approval gate in all modes. It can be written without a proposal.
+The active project's state file (`<project-states-dir>/<slug>.md`) is exempt from the approval gate in all modes. It can be written without a proposal.
 
 ## Mode interactions
 
-- **Normal mode:** Approval gate applies to all file mutations (except state.md).
+- **Normal mode:** Approval gate applies to all file mutations (except the active project's state file).
 - **Plan mode:** Approval gate applies, but only project state file + artifacts dir + Jira draft paths are writable at all.
 - **Readonly mode:** All mutations blocked regardless of approval state.
 

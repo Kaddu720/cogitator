@@ -6,7 +6,6 @@
  *   - Targeted file access policy/types/helpers for disciplined reads and searches
  *   - Bash command safety classification (DESTRUCTIVE/SAFE patterns, isSafeCommand)
  *   - Mode tool allowlists and getModeTools
- *   - Protected path constant and loadProtectedPaths
  *   - JIRA_TMP_PREFIX
  *   - Mode descriptor types, MODE_DESCRIPTORS map, and getModeDescriptor
  *   - Mode display formatters (formatMode, projectStatusLine)
@@ -28,15 +27,6 @@ import { type ProjectRecord } from "./projects.js";
 
 /** Prefix for ephemeral Jira closeout drafts written in plan mode. */
 export const JIRA_TMP_PREFIX = "/tmp/jira-closeout-";
-
-// ─── Protected paths ────────────────────────────────────────────────────────────
-
-const PROTECTED_SECRET_ROOT = "/run/cogitator-secrets";
-
-/** Return the list of filesystem paths that are always blocked from agent access. */
-export function loadProtectedPaths(): string[] {
-  return [PROTECTED_SECRET_ROOT];
-}
 
 // ─── Targeted file access policy ────────────────────────────────────────────────
 
@@ -226,6 +216,7 @@ export function isSafeCommand(command: string): boolean {
 
 export const CHANGE_PROPOSAL_WORKFLOW_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/change-proposal-workflow.md", import.meta.url));
 export const TARGETED_FILE_ACCESS_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/targeted-file-access.md", import.meta.url));
+export const COMPUTE_IN_VM_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/compute-in-vm.md", import.meta.url));
 export const SECRET_SAFETY_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/secret-safety.md", import.meta.url));
 export const MODE_NORMAL_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/mode-normal.md", import.meta.url));
 export const MODE_READONLY_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/mode-readonly.md", import.meta.url));

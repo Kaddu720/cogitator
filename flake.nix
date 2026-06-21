@@ -1,19 +1,30 @@
 {
-  description = "Sandboxed pi launcher for NixOS using bubblewrap";
+  description = "pi launcher with Gondolin micro-VM isolation and a project-aware workflow extension";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     pi = {
-      url = "github:badlogic/pi-mono/v0.67.2";
+      url = "github:earendil-works/pi/v0.79.9";
       flake = false;
     };
     pi-web-access = {
       url = "git+https://github.com/nicobailon/pi-web-access.git";
       flake = false;
     };
-    caveman = {
-      url = "git+https://github.com/JuliusBrussee/caveman.git";
+    pi-mcp-adapter = {
+      url = "git+https://github.com/nicobailon/pi-mcp-adapter.git";
+      flake = false;
+    };
+    ponytail = {
+      url = "github:DietrichGebert/ponytail";
+      flake = false;
+    };
+    gondolin = {
+      # Tracks a release tag, pi-style: `nix flake update gondolin` (or bumping
+      # the tag) advances the version; the prebuilt npm tarball hash + npmDepsHash
+      # below are updated per bump.
+      url = "github:earendil-works/gondolin/v0.12.0";
       flake = false;
     };
   };
@@ -24,36 +35,68 @@
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
         isLinux = pkgs.stdenv.isLinux;
-        isDarwin = pkgs.stdenv.isDarwin;
 
         defaultControlRoot = "/home/kaddu/.local/share/cogitator";
-        workflowExtension = ./extensions/workflow-mode.ts;
+        # Reference the entry within the flake source tree (via self) so its
+        # sibling modules (./commands.js, …) and ../resources/ are present next to
+        # it, and the store reference carries proper context (no toString warning).
+        workflowExtension = "${self}/extensions/workflow-mode.ts";
+        cogitatorSkillsDir = ./skills;
         controlRootGitignore = ./control-root.gitignore;
         # Version auto-derived from flake input; hashes updated manually per bump.
         piVersion = (builtins.fromJSON (builtins.readFile "${inputs.pi}/packages/coding-agent/package.json")).version;
         piPackageLock = ./pi-package-lock.json;
         piWebAccessSrc = inputs.pi-web-access;
-        cavemanSrc = inputs.caveman;
+        ponytailSrc = inputs.ponytail;
+        # pi-mcp-adapter (community MCP bridge, same author as pi-web-access). The
+        # repo ships no lockfile, so vendor a generated production lock and strip
+        # dev/optional deps so importNpmLock + npm ci agree. At runtime the adapter
+        # reads .mcp.json (mirroring the host MCP config; secrets stay out of the repo).
+        piMcpAdapterSrc = inputs.pi-mcp-adapter;
+        piMcpAdapterPackageLock = ./pi-mcp-adapter-package-lock.json;
+        # Gondolin micro-VM sandbox: version auto-derived from the input's host
+        # package; the prebuilt npm tarball is fetched + built (pi-style).
+        gondolinVersion = (builtins.fromJSON (builtins.readFile "${inputs.gondolin}/host/package.json")).version;
+        gondolinPackageLock = ./gondolin-package-lock.json;
 
-        piSrc = pkgs.fetchzip {
-          url = "https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-${piVersion}.tgz";
-          hash = "sha256-D1l37BnJN+by3F7XnkGnJ1eTQC5kX0KHiUXy5/I0uKI=";
+        piRawSrc = pkgs.fetchzip {
+          url = "https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-${piVersion}.tgz";
+          hash = "sha256-mzolHO39SycdFsZM5jEc5QY6FTdvS//tjK1X9mZBKIo=";
           stripRoot = false;
         };
+
+        # The published tarball ships an npm-shrinkwrap.json that npm tooling
+        # (incl. fetchNpmDeps) prefers over package-lock.json, but it omits
+        # integrity for the @earendil-works/* workspace siblings. Pre-patch the
+        # source: drop the shrinkwrap and use our integrity-completed lock so the
+        # deps fetch and `npm ci` read identical, valid content.
+        # Named "source" so stdenv's unpackPhase yields source/package,
+        # matching buildNpmPackage's sourceRoot below.
+        piSrc = pkgs.runCommand "source" {} ''
+          cp -r ${piRawSrc} $out
+          chmod -R u+w $out
+          rm -f $out/package/npm-shrinkwrap.json
+          cp ${piPackageLock} $out/package/package-lock.json
+          # Drop devDependencies so package.json matches the production lock;
+          # `npm ci` validates the lock against ALL of package.json (incl. dev)
+          # and pi ships prebuilt dist/, so dev deps are never needed.
+          ${pkgs.jq}/bin/jq 'del(.devDependencies)' $out/package/package.json > $out/package/package.json.tmp
+          mv $out/package/package.json.tmp $out/package/package.json
+        '';
 
         piBasePkg = pkgs.buildNpmPackage rec {
           pname = "pi-coding-agent";
           version = piVersion;
           src = piSrc;
           sourceRoot = "source/package";
-          npmDepsHash = "sha256-o12mImfKKXd3rUd/mK7WxJEfpORqdcI1LOnJxGujZdU=";
+          npmDepsHash = "sha256-IDH/RyRidsGqpTOpUhNAjdxjLyUPB4xZKfsohzUgDb4=";
 
           dontNpmBuild = true;
           npmPackFlags = [ "--ignore-scripts" ];
-
-          postPatch = ''
-            cp ${piPackageLock} package-lock.json
-          '';
+          # The published npm-shrinkwrap.json is a production lock (no devDeps),
+          # so install runtime deps only. pi ships prebuilt dist/, so dev deps
+          # (e.g. @types/*) are never needed here.
+          npmFlags = [ "--omit=dev" ];
 
           postInstall = ''
             mkdir -p $out/share/pi
@@ -66,19 +109,38 @@
             chmod -R u+w "$pwa_dir"
 
             # Symlink pi core peer dependencies into pi-web-access's
-            # node_modules so bare imports like @mariozechner/* and
+            # node_modules so bare imports like @earendil-works/* and
             # @sinclair/typebox resolve correctly.
-            pi_nm="$out/lib/node_modules/@mariozechner/pi-coding-agent/node_modules"
+            pi_nm="$out/lib/node_modules/@earendil-works/pi-coding-agent/node_modules"
             pwa_nm="$pwa_dir/node_modules"
-            for pkg in @mariozechner/pi-coding-agent @mariozechner/pi-ai @mariozechner/pi-tui @sinclair/typebox; do
+            for pkg in @earendil-works/pi-coding-agent @earendil-works/pi-ai @earendil-works/pi-tui @sinclair/typebox; do
               if [ -d "$pi_nm/$pkg" ]; then
                 mkdir -p "$pwa_nm/$(dirname $pkg)"
                 ln -sfn "$pi_nm/$pkg" "$pwa_nm/$pkg"
               fi
             done
 
-            makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/pi \
-              --add-flags $out/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js \
+            # Same pattern for pi-mcp-adapter, but it has real non-peer deps (the
+            # MCP SDK etc.), so symlink-copy its full installed node_modules, then
+            # override the pi core packages with the running pi's own versions.
+            mcp_dir="$out/share/pi-mcp-adapter"
+            cp -r ${piMcpAdapterPkg}/lib/node_modules/pi-mcp-adapter "$mcp_dir"
+            chmod -R u+w "$mcp_dir"
+            mcp_nm="$mcp_dir/node_modules"
+            mkdir -p "$mcp_nm"
+            cp -rs ${piMcpAdapterPkg}/lib/node_modules/. "$mcp_nm/"
+            chmod -R u+w "$mcp_nm"
+            rm -rf "$mcp_nm/pi-mcp-adapter"
+            for pkg in @earendil-works/pi-coding-agent @earendil-works/pi-ai @earendil-works/pi-tui; do
+              if [ -d "$pi_nm/$pkg" ]; then
+                mkdir -p "$mcp_nm/$(dirname $pkg)"
+                rm -rf "$mcp_nm/$pkg"
+                ln -sfn "$pi_nm/$pkg" "$mcp_nm/$pkg"
+              fi
+            done
+
+            makeWrapper ${pkgs.nodejs_24}/bin/node $out/bin/pi \
+              --add-flags $out/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js \
               --prefix PATH : ${lib.makeBinPath [ pkgs.git ]}
           '';
 
@@ -98,20 +160,122 @@
           npmPackFlags = [ "--ignore-scripts" ];
         };
 
-        cavemanPkg = pkgs.runCommand "caveman-package" {} ''
+        piMcpAdapterSrcWithLock = pkgs.runCommand "pi-mcp-adapter-src" {} ''
+          cp -r ${piMcpAdapterSrc} $out
+          chmod -R u+w $out
+          cp ${piMcpAdapterPackageLock} $out/package-lock.json
+          ${pkgs.jq}/bin/jq 'del(.devDependencies, .optionalDependencies)' $out/package.json > $out/package.json.tmp
+          mv $out/package.json.tmp $out/package.json
+        '';
+
+        piMcpAdapterPkg = pkgs.buildNpmPackage {
+          pname = "pi-mcp-adapter";
+          version = inputs.pi-mcp-adapter.rev or "unstable";
+          src = piMcpAdapterSrcWithLock;
+          npmDeps = pkgs.importNpmLock {
+            npmRoot = piMcpAdapterSrcWithLock;
+          };
+          npmConfigHook = pkgs.importNpmLock.npmConfigHook;
+          dontNpmBuild = true;
+          npmPackFlags = [ "--ignore-scripts" ];
+        };
+
+        ponytailPkg = pkgs.runCommand "ponytail-package" {} ''
           mkdir -p "$out/share"
-          cp -r ${cavemanSrc} "$out/share/caveman"
-          chmod -R u+w "$out/share/caveman"
-          cat > "$out/share/caveman/package.json" <<'EOF'
+          cp -r ${ponytailSrc} "$out/share/ponytail"
+          chmod -R u+w "$out/share/ponytail"
+          cat > "$out/share/ponytail/package.json" <<'EOF'
 {
-  "name": "caveman-package",
-  "version": "0.0.0-${inputs.caveman.rev or "unstable"}",
+  "name": "ponytail-package",
+  "version": "0.0.0-${inputs.ponytail.rev or "unstable"}",
+  "keywords": ["pi-package"],
+  "pi": {
+    "skills": ["./.openclaw/skills"]
+  }
+}
+EOF
+        '';
+
+        # Cogitator's own skills (e.g. new-project), shipped from ./skills and
+        # registered as a pi package so /new-project can kick them off.
+        cogitatorSkillsPkg = pkgs.runCommand "cogitator-skills-package" {} ''
+          mkdir -p "$out/share/cogitator-skills"
+          cp -r ${cogitatorSkillsDir}/. "$out/share/cogitator-skills/skills/"
+          chmod -R u+w "$out/share/cogitator-skills"
+          cat > "$out/share/cogitator-skills/package.json" <<'EOF'
+{
+  "name": "cogitator-skills-package",
+  "version": "0.0.0",
   "keywords": ["pi-package"],
   "pi": {
     "skills": ["./skills"]
   }
 }
 EOF
+        '';
+
+        # Gondolin SDK/CLI built from its prebuilt npm tarball (ships dist/).
+        gondolinRawSrc = pkgs.fetchzip {
+          url = "https://registry.npmjs.org/@earendil-works/gondolin/-/gondolin-${gondolinVersion}.tgz";
+          hash = "sha256-sUV/S7xePwGCKTET5aJkEERuWxJwkKCNgdiU2ztaaUo=";
+          stripRoot = false;
+        };
+        # Tarball has no lockfile; vendor a production lock and strip dev/optional
+        # deps so `npm ci` matches it (we use the default QEMU backend, not krun).
+        gondolinSrc = pkgs.runCommand "source" {} ''
+          cp -r ${gondolinRawSrc} $out
+          chmod -R u+w $out
+          cp ${gondolinPackageLock} $out/package/package-lock.json
+          ${pkgs.jq}/bin/jq 'del(.devDependencies, .optionalDependencies)' $out/package/package.json > $out/package/package.json.tmp
+          mv $out/package/package.json.tmp $out/package/package.json
+        '';
+        gondolinPkg = pkgs.buildNpmPackage {
+          pname = "gondolin";
+          version = gondolinVersion;
+          src = gondolinSrc;
+          sourceRoot = "source/package";
+          npmDepsHash = "sha256-JH+4wUsc8nxVxpQwMluxLHzf6jPdYjemqkqfx9JiILI=";
+          dontNpmBuild = true;
+          npmPackFlags = [ "--ignore-scripts" ];
+          npmFlags = [ "--omit=dev" "--omit=optional" ];
+        };
+
+        # Pi extension that routes pi's read/write/edit/bash into the Gondolin
+        # micro-VM. Uses the version-aligned example bundled in the pi package,
+        # placed outside node_modules so jiti transforms its TypeScript, with the
+        # gondolin SDK and pi core resolvable as peer deps.
+        gondolinExtPkg = pkgs.runCommand "pi-extension-gondolin" {} ''
+          dir="$out/share/pi-extension-gondolin"
+          mkdir -p "$dir"
+          cp -r ${piBasePkg}/share/pi/examples/extensions/gondolin/. "$dir/"
+          chmod -R u+w "$dir"
+          nm="$dir/node_modules/@earendil-works"
+          mkdir -p "$nm"
+          ln -sfn ${gondolinPkg}/lib/node_modules/@earendil-works/gondolin "$nm/gondolin"
+          ln -sfn ${piBasePkg}/lib/node_modules/@earendil-works/pi-coding-agent "$nm/pi-coding-agent"
+        '';
+
+        # pi's bundled `handoff` example as a registered package: lossless-ish
+        # session transfer (continuity across compaction). In-process, no separate
+        # execution sandbox, so it composes with Gondolin. Needs pi core + pi-ai +
+        # pi-agent-core resolvable as peers (it imports all three at the top level).
+        handoffExtPkg = pkgs.runCommand "pi-extension-handoff" {} ''
+          dir="$out/share/pi-extension-handoff"
+          mkdir -p "$dir/node_modules/@earendil-works"
+          cp ${piBasePkg}/share/pi/examples/extensions/handoff.ts "$dir/handoff.ts"
+          cat > "$dir/package.json" <<'EOF'
+{
+  "name": "pi-extension-handoff",
+  "private": true,
+  "type": "module",
+  "pi": { "extensions": ["./handoff.ts"] }
+}
+EOF
+          pi_nm="${piBasePkg}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules"
+          ln -sfn ${piBasePkg}/lib/node_modules/@earendil-works/pi-coding-agent "$dir/node_modules/@earendil-works/pi-coding-agent"
+          for pkg in pi-ai pi-tui pi-agent-core; do
+            ln -sfn "$pi_nm/@earendil-works/$pkg" "$dir/node_modules/@earendil-works/$pkg"
+          done
         '';
 
         validEnvVarPattern = "^[A-Z_][A-Z0-9_]*$";
@@ -129,20 +293,6 @@ EOF
             lib.mapAttrsToList (key: value: ''
               export ${key}=${lib.escapeShellArg value}
             '') attrs
-          );
-
-        renderReadonlyBindLines = bindings:
-          lib.concatStringsSep "\n" (
-            map (
-              binding: ''
-                if [[ -f ${lib.escapeShellArg binding.source} ]]; then
-                  resolved_source="$(resolve_path ${lib.escapeShellArg binding.source})"
-                  if [[ -f "$resolved_source" ]]; then
-                    bind_args+=(--ro-bind "$resolved_source" ${lib.escapeShellArg binding.target})
-                  fi
-                fi
-              ''
-            ) bindings
           );
 
         mkSecretBindings = secretFiles:
@@ -234,10 +384,9 @@ EOF
             providerSecretFiles = mkProviderSecretFiles providerConfigs;
             allSecretFiles = checkedSecretEnvFiles // providerSecretFiles;
             secretBindings = mkSecretBindings allSecretFiles;
-            protectedSecretPaths = map (binding: binding.target) secretBindings;
             extensions = [ workflowExtension ] ++ extraExtensions;
             extensionFlags = lib.concatStringsSep " \\\n            " (
-              map (path: "--extension ${lib.escapeShellArg (toString path)}") extensions
+              map (path: "--extension ${lib.escapeShellArg "${path}"}") extensions
             );
 
             runtimeTools =
@@ -256,17 +405,16 @@ EOF
                 cacert
                 ffmpeg
                 yt-dlp
-                nodejs_22
+                nodejs_24
                 python3
+                qemu
               ])
               ++ lib.optionals isLinux (with pkgs; [
-                bubblewrap
                 xdg-utils
               ])
               ++ extraRuntimeTools;
 
             runtimePath = lib.makeBinPath runtimeTools;
-            staticStoreRoots = lib.unique (map toString ([ piPkg piBasePkg cavemanPkg ] ++ runtimeTools ++ extensions));
 
             piPkg = pkgs.writeShellScriptBin "pi" ''
               set -euo pipefail
@@ -503,36 +651,29 @@ EOF
 
               usage() {
                 cat <<'EOF'
-Usage: cogi [--workspace PATH] [--control-root PATH] [--project-id ID] [--host-pi-auth] [--bind-ro SRC[:DEST]] [--bind-rw SRC[:DEST]] [--] [pi args...]
+Usage: cogi [--workspace PATH] [--control-root PATH] [--project-id ID] [--host-pi-auth] [--] [pi args...]
 
 Options:
-  --workspace PATH     Workspace to mount writable inside the sandbox.
-                       Defaults to current working directory.
-  --control-root PATH  Central cogitator control root containing projects/<id>/project.json.
-                       Default: ${controlRoot}
-  --project-id ID      Preselect a cogitator project id instead of prompting at startup.
-  --host-pi-auth       Use host ~/.pi/agent auth.json and models.json inside the sandbox agent dir.
-  --bind-ro SPEC       Extra read-only bind mount. SPEC is SRC or SRC:DEST.
-  --bind-rw SPEC       Extra read-write bind mount. SPEC is SRC or SRC:DEST.
-  --help               Show this help.
+  --workspace PATH         Workspace directory; defaults to the current directory.
+  --control-root PATH      Cogitator runtime root (sessions, gitignore). Default: ${controlRoot}
+  --project-states-dir PATH  Directory of markdown project state files + INDEX.md.
+                           Default: \$COGITATOR_PROJECT_STATES_DIR or ~/Projects/projectStates
+  --project-id ID          Preselect a project (state-file slug) instead of prompting.
+  --host-pi-auth           Use host ~/.pi/agent auth.json and models.json.
+  --help                   Show this help.
 
-Level 2 defaults:
-  - workspace is writable
-  - control root is writable for project state and artifacts, but only the configured control-root subtree is exposed at its host absolute path
-  - /nix/store is mounted read-only
-  - HOME is isolated at /tmp/home
-  - private /tmp
-  - network is enabled for cloud providers
-  - no access to host home, /var, or /run unless explicitly bound
+Isolation:
+  Process isolation is provided by Gondolin, wired in as a pi extension that
+  routes pi's read/write/edit/bash tools into a local QEMU micro-VM with the
+  workspace mounted at /workspace. cogi itself runs pi directly on the host.
 EOF
               }
 
               workspace="$PWD"
               control_root="${controlRoot}"
+              project_states_dir="''${COGITATOR_PROJECT_STATES_DIR:-''${HOME:-/home/kaddu}/Projects/projectStates}"
               project_id="${if defaultProjectId == null then "" else defaultProjectId}"
               bind_host_pi_auth=0
-              declare -a extra_ro_binds=()
-              declare -a extra_rw_binds=()
               declare -a pi_args=()
 
               while [[ $# -gt 0 ]]; do
@@ -545,6 +686,10 @@ EOF
                     control_root="$2"
                     shift 2
                     ;;
+                  --project-states-dir)
+                    project_states_dir="$2"
+                    shift 2
+                    ;;
                   --project-id)
                     project_id="$2"
                     shift 2
@@ -552,14 +697,6 @@ EOF
                   --host-pi-auth)
                     bind_host_pi_auth=1
                     shift
-                    ;;
-                  --bind-ro)
-                    extra_ro_binds+=("$2")
-                    shift 2
-                    ;;
-                  --bind-rw)
-                    extra_rw_binds+=("$2")
-                    shift 2
                     ;;
                   --help|-h)
                     usage
@@ -594,6 +731,8 @@ PY
 
               workspace="$(resolve_path "$workspace")"
               control_root="$(resolve_path "$control_root")"
+              mkdir -p "$project_states_dir"
+              project_states_dir="$(resolve_path "$project_states_dir")"
 
               if [[ ! -d "$workspace" ]]; then
                 echo "Workspace does not exist or is not a directory: $workspace" >&2
@@ -634,8 +773,7 @@ PY
               agent_dir_host="$(mktemp -d)"
               agent_secrets_dir="$agent_dir_host/secrets"
               mkdir -p "$agent_secrets_dir"
-              seatbelt_profile=""
-              trap 'if [[ -n "$host_pi_auth_json" && -e "$agent_dir_host/auth.json" ]]; then cp "$agent_dir_host/auth.json" "$host_pi_auth_json"; fi; if [[ -n "$seatbelt_profile" && -e "$seatbelt_profile" ]]; then rm -f "$seatbelt_profile"; fi; rm -rf "$agent_dir_host"' EXIT
+              trap 'if [[ -n "$host_pi_auth_json" && -e "$agent_dir_host/auth.json" ]]; then cp "$agent_dir_host/auth.json" "$host_pi_auth_json"; fi; rm -rf "$agent_dir_host"' EXIT
 ${renderSecretStagingLines secretBindings}
               cat > "$agent_dir_host/cogitator-models.json" <<'EOF'
 ${builtins.toJSON piModelsConfig}
@@ -646,7 +784,11 @@ ${builtins.toJSON ({
                 defaultModel = checkedPlainEnv.COGITATOR_DEFAULT_MODEL or null;
                 packages = [
                   "${piBasePkg}/share/pi-web-access"
-                  "${cavemanPkg}/share/caveman"
+                  "${piBasePkg}/share/pi-mcp-adapter"
+                  "${ponytailPkg}/share/ponytail"
+                  "${cogitatorSkillsPkg}/share/cogitator-skills"
+                  "${gondolinExtPkg}/share/pi-extension-gondolin"
+                  "${handoffExtPkg}/share/pi-extension-handoff"
                 ];
               })}
 EOF
@@ -755,79 +897,6 @@ PY
                 cp "$host_pi_auth_json" "$agent_dir_host/auth.json"
               fi
 
-              matching_project_dirs="$(${pkgs.python3}/bin/python - <<'PY' "$control_root/projects" "$workspace" "$project_id"
-import json
-import os
-import sys
-
-projects_root = sys.argv[1]
-workspace = os.path.realpath(sys.argv[2])
-project_id = sys.argv[3].strip()
-
-
-def matches_workspace(project_json_path: str) -> bool:
-    try:
-        with open(project_json_path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except Exception:
-        return False
-
-    repos = data.get("repos")
-    if not isinstance(repos, list):
-        return False
-
-    for repo in repos:
-        if not isinstance(repo, dict):
-            continue
-        repo_path = repo.get("path")
-        if not isinstance(repo_path, str) or not repo_path:
-            continue
-
-        linked = os.path.realpath(repo_path)
-        try:
-            common = os.path.commonpath([workspace, linked])
-        except ValueError:
-            continue
-
-        if common == linked or common == workspace:
-            return True
-
-    return False
-
-
-if project_id:
-    project_dir = os.path.join(projects_root, project_id)
-    if os.path.isdir(project_dir):
-        print(os.path.realpath(project_dir))
-elif os.path.isdir(projects_root):
-    for entry in sorted(os.listdir(projects_root)):
-        project_dir = os.path.join(projects_root, entry)
-        if not os.path.isdir(project_dir):
-            continue
-        if matches_workspace(os.path.join(project_dir, "project.json")):
-            print(os.path.realpath(project_dir))
-PY
-              )"
-
-              add_bind() {
-                local mode="$1"
-                local spec="$2"
-                local src dest
-                if [[ "$spec" == *:* ]]; then
-                  src="''${spec%%:*}"
-                  dest="''${spec#*:}"
-                else
-                  src="$spec"
-                  dest="$spec"
-                fi
-                src="$(resolve_path "$src")"
-                if [[ ! -e "$src" ]]; then
-                  echo "Bind source does not exist: $src" >&2
-                  exit 1
-                fi
-                bind_args+=("$mode" "$src" "$dest")
-              }
-
               session_flag_already_set=0
               session_flag_takes_value=0
               for arg in "''${pi_args[@]}"; do
@@ -849,161 +918,16 @@ PY
                 pi_args=(--session-dir "$session_dir" "''${pi_args[@]}")
               fi
 
-              declare -a bind_args=()
-              sandbox_agent_dir="/tmp/cogitator-pi-agent"
-              bind_args+=(--dir "$sandbox_agent_dir")
-              bind_args+=(--bind "$agent_dir_host" "$sandbox_agent_dir")
-
-              declare -A mounted_repo_paths=()
-              mounted_repo_paths["$workspace"]=1
-
-              if [[ "$control_root" != "$workspace" ]]; then
-                # Preserve the host absolute control-root path in the sandbox, but only
-                # bind the control-root subtree itself. Parent directories such as
-                # ~/.local and ~/.local/share stay synthetic so the model only sees
-                # ~/.local/share/cogitator, not unrelated host files under ~/.local.
-                bind_args+=(--dir "$control_root")
-                bind_args+=(--bind "$control_root/projects" "$control_root/projects")
-                bind_args+=(--dir "$sessions_root")
-                bind_args+=(--bind "$sessions_root" "$sessions_root")
-
-                if [[ -e "$gitignore_path" ]]; then
-                  bind_args+=(--ro-bind "$gitignore_path" "$control_root/.gitignore")
-                fi
-
-                while IFS= read -r project_dir; do
-                  if [[ -z "$project_dir" ]]; then
-                    continue
-                  fi
-
-                  project_repo_paths="$(${pkgs.python3}/bin/python - <<'PY' "$project_dir/project.json"
-import json
-import os
-import sys
-
-project_json_path = sys.argv[1]
-
-try:
-    with open(project_json_path, "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-except Exception:
-    sys.exit(0)
-
-repos = data.get("repos")
-if not isinstance(repos, list):
-    sys.exit(0)
-
-for repo in repos:
-    if not isinstance(repo, dict):
-        continue
-    repo_path = repo.get("path")
-    if not isinstance(repo_path, str) or not repo_path:
-        continue
-    print(os.path.realpath(repo_path))
-PY
-                  )"
-
-                  while IFS= read -r repo_path; do
-                    if [[ -z "$repo_path" || -n "''${mounted_repo_paths[$repo_path]:-}" ]]; then
-                      continue
-                    fi
-                    if [[ ! -d "$repo_path" ]]; then
-                      echo "Warning: linked repo path is missing, skipping bind: $repo_path" >&2
-                      continue
-                    fi
-                    mounted_repo_paths["$repo_path"]=1
-                    bind_args+=(--bind "$repo_path" "$repo_path")
-                  done <<< "$project_repo_paths"
-                done <<< "$matching_project_dirs"
-              fi
-
-              for etc_name in hosts resolv.conf nsswitch.conf; do
-                if [[ -e "/etc/$etc_name" ]]; then
-                  resolved_etc="$(resolve_path "/etc/$etc_name")"
-                  if [[ -e "$resolved_etc" ]]; then
-                    bind_args+=(--ro-bind "$resolved_etc" "/etc/$etc_name")
-                  fi
-                fi
-              done
-
-              for spec in "''${extra_ro_binds[@]}"; do
-                add_bind --ro-bind "$spec"
-              done
-              for spec in "''${extra_rw_binds[@]}"; do
-                add_bind --bind "$spec"
-              done
-
-              declare -a store_roots=(
-                ${lib.concatMapStringsSep "\n                " (path: "\"${path}\"") staticStoreRoots}
-              )
-
-              normalize_store_root() {
-                local path="$1"
-                if [[ "$path" != /nix/store/* ]]; then
-                  return 1
-                fi
-                local remainder="''${path#/nix/store/}"
-                printf '/nix/store/%s\n' "''${remainder%%/*}"
-              }
-
-              add_store_root() {
-                local candidate="$1"
-                if [[ -z "$candidate" || "$candidate" != /nix/store/* ]]; then
-                  return 0
-                fi
-                candidate="$(resolve_path "$candidate")"
-                if [[ ! -e "$candidate" ]]; then
-                  return 0
-                fi
-                store_roots+=("$(normalize_store_root "$candidate")")
-              }
-
-              declare -a bwrap_args=(
-                --unshare-all
-                --share-net
-                --die-with-parent
-                --new-session
-                --proc /proc
-                --dev /dev
-                --dir /nix
-                --dir /nix/store
-                --dir /bin
-                --dir /etc
-                --symlink ${pkgs.bash}/bin/bash /bin/sh
-                --symlink ${pkgs.bash}/bin/bash /bin/bash
-                --tmpfs /tmp
-                --dir /run
-                --dir /run/cogitator-secrets
-                --bind "$workspace" "$workspace"
-                --chdir "$workspace"
-                --clearenv
-                --setenv HOME /tmp/home
-                --dir /tmp/home
-                --setenv TMPDIR /tmp
-                --setenv PATH "${runtimePath}"
-                --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-                --setenv NIX_SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-                --setenv PI_SKIP_VERSION_CHECK 1
-                --setenv PI_CODING_AGENT_DIR "$sandbox_agent_dir"
-                --setenv COGITATOR_CONTROL_ROOT "$control_root"
-              )
-
-              if [[ -n "$project_id" ]]; then
-                bwrap_args+=(--setenv COGITATOR_PROJECT_ID "$project_id")
-              fi
-
               resolve_host_editor_cmd() {
                 local editor_cmd="$1"
                 if [[ -z "$editor_cmd" ]]; then
                   return 0
                 fi
-
                 local editor_bin="''${editor_cmd%% *}"
                 local editor_rest=""
                 if [[ "$editor_cmd" != "$editor_bin" ]]; then
                   editor_rest="''${editor_cmd#"$editor_bin"}"
                 fi
-
                 local resolved_bin=""
                 if [[ "$editor_bin" == */* ]]; then
                   if [[ -e "$editor_bin" ]]; then
@@ -1016,7 +940,6 @@ PY
                     resolved_bin="$(resolve_path "$host_editor_path")"
                   fi
                 fi
-
                 if [[ -n "$resolved_bin" ]]; then
                   printf '%s%s\n' "$resolved_bin" "$editor_rest"
                 else
@@ -1024,192 +947,65 @@ PY
                 fi
               }
 
-              resolved_editor="$(resolve_host_editor_cmd "''${EDITOR:-}")"
-              if [[ -n "$resolved_editor" ]]; then
-                add_store_root "''${resolved_editor%% *}"
-                bwrap_args+=(--setenv EDITOR "$resolved_editor")
-              fi
-
-              resolved_visual="$(resolve_host_editor_cmd "''${VISUAL:-}")"
-              if [[ -n "$resolved_visual" ]]; then
-                add_store_root "''${resolved_visual%% *}"
-                bwrap_args+=(--setenv VISUAL "$resolved_visual")
-              fi
-
-              declare -a store_bind_args=()
-              declare -A seen_store_paths=()
-              add_store_bind_path() {
-                local path="$1"
-                if [[ -z "$path" || ! -e "$path" || -n "''${seen_store_paths[$path]:-}" ]]; then
-                  return 0
-                fi
-                seen_store_paths["$path"]=1
-                store_bind_args+=(--ro-bind "$path" "$path")
-              }
-
-              if [[ "''${#store_roots[@]}" -gt 0 ]]; then
-                while IFS= read -r store_path; do
-                  if [[ -n "$store_path" ]]; then
-                    add_store_bind_path "$store_path"
-                  fi
-                done < <(${pkgs.nix}/bin/nix-store --query --requisites "''${store_roots[@]}")
-              fi
-
-              bwrap_args+=("''${store_bind_args[@]}")
-              bwrap_args+=("''${bind_args[@]}")
-
-${lib.optionalString isLinux ''
-              ${pkgs.bubblewrap}/bin/bwrap \
-                "''${bwrap_args[@]}" \
-                ${piPkg}/bin/pi \
-                "''${pi_args[@]}"
-''}${lib.optionalString isDarwin ''
-              if [[ ! -x /usr/bin/sandbox-exec ]]; then
-                echo "macOS sandbox-exec is required for Darwin isolation" >&2
-                exit 1
-              fi
-
-              validate_darwin_bind_spec() {
-                local spec="$1"
-                local src="$spec"
-                local dest="$spec"
-                if [[ "$spec" == *:* ]]; then
-                  src="''${spec%%:*}"
-                  dest="''${spec#*:}"
-                fi
-                src="$(resolve_path "$src")"
-                if [[ "$dest" != "$src" ]]; then
-                  echo "Darwin sandbox does not support remapped bind destinations: $spec" >&2
-                  exit 1
-                fi
-              }
-
-              for spec in "''${extra_ro_binds[@]}"; do
-                validate_darwin_bind_spec "$spec"
-              done
-              for spec in "''${extra_rw_binds[@]}"; do
-                validate_darwin_bind_spec "$spec"
-              done
-
-              sandbox_home="$agent_dir_host/home"
-              sandbox_tmp="$agent_dir_host/tmp"
-              seatbelt_profile="$agent_dir_host/cogitator-seatbelt.sb"
-              mkdir -p "$sandbox_home" "$sandbox_tmp"
-
-              seatbelt_json_quote() {
-                ${pkgs.python3}/bin/python - <<'PY' "$1"
-import json
-import sys
-print(json.dumps(sys.argv[1]))
-PY
-              }
-
-              seatbelt_emit_subpath() {
-                local path="$1"
-                if [[ -z "$path" || ! -e "$path" ]]; then
-                  return 0
-                fi
-                path="$(resolve_path "$path")"
-                printf '  (subpath %s)\n' "$(seatbelt_json_quote "$path")"
-              }
-
-              seatbelt_emit_spec_source() {
-                local spec="$1"
-                local src="$spec"
-                if [[ "$src" == *:* ]]; then
-                  src="''${src%%:*}"
-                fi
-                seatbelt_emit_subpath "$src"
-              }
-
-              {
-                echo '(version 1)'
-                echo '(deny default)'
-                echo '(import "system.sb")'
-                echo '(allow process*)'
-                echo '(allow sysctl-read)'
-                echo '(allow network*)'
-                echo '(allow file-read*'
-                seatbelt_emit_subpath '/nix/store'
-                seatbelt_emit_subpath '/System'
-                seatbelt_emit_subpath '/Library'
-                seatbelt_emit_subpath '/usr'
-                seatbelt_emit_subpath '/bin'
-                seatbelt_emit_subpath '/sbin'
-                seatbelt_emit_subpath '/etc'
-                seatbelt_emit_subpath '/private/etc'
-                seatbelt_emit_subpath '/var'
-                seatbelt_emit_subpath '/private/var'
-                seatbelt_emit_subpath '/dev'
-                seatbelt_emit_subpath '/Applications'
-                seatbelt_emit_subpath '/opt'
-                seatbelt_emit_subpath '/opt/homebrew'
-                seatbelt_emit_subpath '/private/tmp'
-                seatbelt_emit_subpath '/tmp'
-                seatbelt_emit_subpath "$agent_dir_host"
-                seatbelt_emit_subpath "$workspace"
-                seatbelt_emit_subpath "$control_root"
-                seatbelt_emit_subpath "$sessions_root"
-                seatbelt_emit_subpath "$session_dir"
-                if [[ -n "$resolved_editor" ]]; then
-                  seatbelt_emit_subpath "''${resolved_editor%% *}"
-                fi
-                if [[ -n "$resolved_visual" ]]; then
-                  seatbelt_emit_subpath "''${resolved_visual%% *}"
-                fi
-                for repo_path in "''${!mounted_repo_paths[@]}"; do
-                  seatbelt_emit_subpath "$repo_path"
-                done
-                for spec in "''${extra_ro_binds[@]}"; do
-                  seatbelt_emit_spec_source "$spec"
-                done
-                for spec in "''${extra_rw_binds[@]}"; do
-                  seatbelt_emit_spec_source "$spec"
-                done
-                echo ')'
-                echo '(allow file-write*'
-                seatbelt_emit_subpath "$agent_dir_host"
-                seatbelt_emit_subpath "$sandbox_home"
-                seatbelt_emit_subpath "$sandbox_tmp"
-                seatbelt_emit_subpath "$workspace"
-                seatbelt_emit_subpath "$control_root"
-                seatbelt_emit_subpath "$sessions_root"
-                seatbelt_emit_subpath "$session_dir"
-                for repo_path in "''${!mounted_repo_paths[@]}"; do
-                  seatbelt_emit_subpath "$repo_path"
-                done
-                for spec in "''${extra_rw_binds[@]}"; do
-                  seatbelt_emit_spec_source "$spec"
-                done
-                echo ')'
-              } > "$seatbelt_profile"
-              chmod 600 "$seatbelt_profile"
-
-              export HOME="$sandbox_home"
-              export TMPDIR="$sandbox_tmp"
-              export TMP="$sandbox_tmp"
-              export TEMP="$sandbox_tmp"
+              # Process isolation is provided by Gondolin (a QEMU micro-VM wired in
+              # as a pi extension that routes tool execution into the guest), so
+              # cogi runs pi directly on the host. It only prepares the agent dir
+              # (merged config + staged provider secrets) and the environment.
               export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               export NIX_SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               export PI_SKIP_VERSION_CHECK=1
+              # Use 1-hour ("long") prompt-cache retention where the model supports
+              # it, matching the extended-cache behavior used in Claude Code.
+              export PI_CACHE_RETENTION="''${PI_CACHE_RETENTION:-long}"
               export PI_CODING_AGENT_DIR="$agent_dir_host"
               export COGITATOR_CONTROL_ROOT="$control_root"
+              export COGITATOR_PROJECT_STATES_DIR="$project_states_dir"
               if [[ -n "$project_id" ]]; then
                 export COGITATOR_PROJECT_ID="$project_id"
               fi
 
+              resolved_editor="$(resolve_host_editor_cmd "''${EDITOR:-}")"
+              if [[ -n "$resolved_editor" ]]; then
+                export EDITOR="$resolved_editor"
+              fi
+              resolved_visual="$(resolve_host_editor_cmd "''${VISUAL:-}")"
+              if [[ -n "$resolved_visual" ]]; then
+                export VISUAL="$resolved_visual"
+              fi
+
               cd "$workspace"
-              /usr/bin/sandbox-exec -f "$seatbelt_profile" ${piPkg}/bin/pi "''${pi_args[@]}"
-''}${lib.optionalString (!isLinux && !isDarwin) ''
-              echo "Unsupported system: ${system}" >&2
-              exit 1
-''}
+              exec ${piPkg}/bin/pi "''${pi_args[@]}"
             '';
           in {
             inherit cogitatorInitProject piBasePkg piPkg piSandbox runtimePath runtimeTools;
           };
 
         defaultCogitator = mkCogitator { };
+
+        # Runs the extension unit tests against the working tree. Provides the pi
+        # packages the extensions import (pi-coding-agent + nested pi-ai/pi-tui/
+        # pi-agent-core) via a node_modules tree, and `type: module` so Node loads
+        # the ESM-only pi-ai correctly. tsx resolves the .js-specifier/.ts files.
+        cogitatorTestRunner = pkgs.writeShellScriptBin "cogitator-test" ''
+          set -euo pipefail
+          repo="''${COGITATOR_REPO:-$PWD}"
+          if [[ ! -f "$repo/extensions/tests/unit.ts" ]]; then
+            echo "cogitator-test: run from the cogitator repo root (no extensions/tests/unit.ts under $repo)" >&2
+            exit 1
+          fi
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          pi_nm="${defaultCogitator.piBasePkg}/lib/node_modules/@earendil-works/pi-coding-agent"
+          mkdir -p "$work/node_modules/@earendil-works"
+          ln -s "$pi_nm" "$work/node_modules/@earendil-works/pi-coding-agent"
+          for p in pi-ai pi-tui pi-agent-core; do
+            ln -s "$pi_nm/node_modules/@earendil-works/$p" "$work/node_modules/@earendil-works/$p"
+          done
+          printf '{ "type": "module" }\n' > "$work/package.json"
+          cp -r "$repo/extensions" "$work/extensions"
+          cd "$work"
+          exec ${pkgs.tsx}/bin/tsx extensions/tests/unit.ts
+        '';
       in {
         lib = {
           inherit mkCogitator;
@@ -1232,6 +1028,11 @@ PY
           cogitator = defaultCogitator.piSandbox;
           cogitator-init-project = defaultCogitator.cogitatorInitProject;
           pi-sandbox = defaultCogitator.piSandbox;
+          tests = cogitatorTestRunner;
+        };
+
+        devShells.default = pkgs.mkShell {
+          packages = [ pkgs.nodejs_24 pkgs.tsx cogitatorTestRunner ];
         };
 
         apps = {
@@ -1250,6 +1051,10 @@ PY
           pi-sandbox = {
             type = "app";
             program = "${defaultCogitator.piSandbox}/bin/cogi";
+          };
+          test = {
+            type = "app";
+            program = "${cogitatorTestRunner}/bin/cogitator-test";
           };
         };
 

@@ -1,21 +1,5 @@
 {
   "nodes": {
-    "caveman": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1776507098,
-        "narHash": "sha256-M+NoWXxrhtbkbe/lmq7P0/KpmqOZzJjhgeUVjY+7N2k=",
-        "ref": "refs/heads/main",
-        "rev": "84cc3c14fa1e10182adaced856e003406ccd250d",
-        "revCount": 141,
-        "type": "git",
-        "url": "https://github.com/JuliusBrussee/caveman.git"
-      },
-      "original": {
-        "type": "git",
-        "url": "https://github.com/JuliusBrussee/caveman.git"
-      }
-    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -31,6 +15,23 @@
       "original": {
         "owner": "numtide",
         "repo": "flake-utils",
+        "type": "github"
+      }
+    },
+    "gondolin": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779188889,
+        "narHash": "sha256-H+gIgvaLQq1nurv4OV9RnS8SEglDB2ExY9OZxwzr79k=",
+        "owner": "earendil-works",
+        "repo": "gondolin",
+        "rev": "628369764fcd2c987b4b99e5159ec90d4febe53a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "earendil-works",
+        "ref": "v0.12.0",
+        "repo": "gondolin",
         "type": "github"
       }
     },
@@ -53,18 +54,34 @@
     "pi": {
       "flake": false,
       "locked": {
-        "lastModified": 1776202877,
-        "narHash": "sha256-trZOz+8nkuFq/JoW9BTDyqD5kN8WuL2SaxSgb45JdEY=",
-        "owner": "badlogic",
-        "repo": "pi-mono",
-        "rev": "5a3e70238958b13092124a25abe9ae72235eb8ac",
+        "lastModified": 1781986537,
+        "narHash": "sha256-+h1D51JM4F2iHCzTA57A5/uAzHQBKSlz/7x3/PtQhec=",
+        "owner": "earendil-works",
+        "repo": "pi",
+        "rev": "615bf2f87444c0f48756d487323519349304906c",
         "type": "github"
       },
       "original": {
-        "owner": "badlogic",
-        "ref": "v0.67.2",
-        "repo": "pi-mono",
+        "owner": "earendil-works",
+        "ref": "v0.79.9",
+        "repo": "pi",
         "type": "github"
+      }
+    },
+    "pi-mcp-adapter": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781336059,
+        "narHash": "sha256-MrorLzxbn3O81B47Nd0d0xnd0xhXgMdobnXgD0axldE=",
+        "ref": "refs/heads/main",
+        "rev": "a764c25609d8daf76e607bc99557621fc3ed8aa9",
+        "revCount": 102,
+        "type": "git",
+        "url": "https://github.com/nicobailon/pi-mcp-adapter.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://github.com/nicobailon/pi-mcp-adapter.git"
       }
     },
     "pi-web-access": {
@@ -83,13 +100,31 @@
         "url": "https://github.com/nicobailon/pi-web-access.git"
       }
     },
+    "ponytail": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1782001397,
+        "narHash": "sha256-se6isAnVQCj+d2tUjHKkVJrvoHKRqkpih2rTSAsjT9g=",
+        "owner": "DietrichGebert",
+        "repo": "ponytail",
+        "rev": "6da37bfa7d0282522c7785759f4d2f1544015354",
+        "type": "github"
+      },
+      "original": {
+        "owner": "DietrichGebert",
+        "repo": "ponytail",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
-        "caveman": "caveman",
         "flake-utils": "flake-utils",
+        "gondolin": "gondolin",
         "nixpkgs": "nixpkgs",
         "pi": "pi",
-        "pi-web-access": "pi-web-access"
+        "pi-mcp-adapter": "pi-mcp-adapter",
+        "pi-web-access": "pi-web-access",
+        "ponytail": "ponytail"
       }
     },
     "systems": {

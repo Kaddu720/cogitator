@@ -1,74 +1,85 @@
 # Project Model
 
-## Control root structure
+Cogitator is **markdown-first**: each project is a single markdown state file in a
+flat project-states directory. There is no `project.json` and no central control
+root for project records — the state files are the source of truth (and are
+typically Jira-synced and owned by you, not cogitator).
+
+## Project states directory
 
 ```
-~/.local/share/cogitator/
-  .gitignore
-  sessions/
-  projects/
-    <project-id>/
-      project.json
-      state.md
-      artifacts/
-        latest-shutdown.md
-      repoContexts/
+~/Projects/projectStates/          # default; override with COGITATOR_PROJECT_STATES_DIR
+  INDEX.md                         # curated index: names, statuses, ordering, meta-projects
+  ARCHIVE.md                       # completed projects (not offered as selectable)
+  <project-slug>.md                # one markdown state file per project
+  artifacts/
+    <project-slug>/
+      latest-shutdown.md           # rolling session checkpoint (written by cogitator)
+      ...                          # other generated artifacts
 ```
 
-## `project.json` schema
+- Location resolves from `COGITATOR_PROJECT_STATES_DIR`, the `cogi --project-states-dir PATH`
+  flag, or the default `~/Projects/projectStates`.
+- `INDEX.md` and `ARCHIVE.md` are not themselves projects.
 
-```json
-{
-  "id": "string (kebab-case)",
-  "name": "string (human-readable)",
-  "description": "string (optional, shown in picker)",
-  "stateFile": "state.md",
-  "artifactsDir": "artifacts",
-  "repos": [
-    {
-      "path": "/absolute/path/to/repo",
-      "name": "repo-name (optional)",
-      "role": "primary | supporting (optional)"
-    }
-  ],
-  "repoContexts": ["repoContexts/file.md"],
-  "tags": ["optional", "tags"]
+## `ProjectRecord`
+
+There is no on-disk metadata file. A record is derived from the filesystem +
+`INDEX.md`:
+
+```ts
+interface ProjectRecord {
+  id: string;          // filename slug without .md (e.g. "sre-3382-ship-vm-to-k8s-migration")
+  name: string;        // from INDEX.md, else the file's first `# ` heading, else titleized id
+  statePath: string;   // absolute path to <slug>.md
+  artifactsDir: string;// <states-dir>/artifacts/<slug>
+  status?: string;     // from INDEX.md or the state file (in_progress/todo/blocked/done/deferred)
 }
 ```
 
-## State file template
+## Selection
 
-The canonical template lives at `resources/templates/project-state-template.md` in the config repo. `/new-project` uses this template when scaffolding a new project.
+`loadProjects()` lists `*.md` (excluding `INDEX.md`/`ARCHIVE.md`), then:
+1. Parses `INDEX.md` for display names, statuses, and ordering (any line with a
+   markdown link to a `*.md` file; a status token on the line is captured).
+2. For files absent from `INDEX.md`, reads the first `# ` heading and a `status:`
+   line for the name/status.
+3. Sorts by `INDEX.md` order first (curated/active first), then alphabetically.
 
-Key sections:
-- **Executive Summary** — status, goal
-- **Background & Context** — status, repos, current focus
-- **Architecture Decisions** — decision records with rationale, date, owner, status
-- **Implementation Plan** — checkbox list of work items
-- **Open Questions & Blockers**
-- **Key File Locations**
-- **Requested Backlog**
-- **Progress Tracking** — todo, in_progress, blocked, done, deferred sub-lists
-- **Next Steps**
-- **Session Shutdown Checkpoint** — auto-updated on shutdown
+`/project` shows the resulting list (`(id) name · status`). There is no repo-based
+auto-matching — the markdown-first model has no structured repo links.
 
-## Linked repos and `/add-repo`
+## State file format
 
-Projects can link multiple repositories. Each linked repo is mounted into the sandbox on `cogi` startup. `/add-repo` persists a new repo path to `project.json` immediately, but a restart is required before the sandbox mounts the new path.
+State files use your own house format (cogitator does not impose a template).
+Parsing is tolerant and looks for, when present:
+- `## Executive Summary` with a `Status:` line (e.g. `Status: **in_progress**`)
+- `## Background & Context`
+- `## Progress Tracking` with `todo`/`in_progress`/`blocked`/`done`/`deferred` bullet groups
+- `## Next Steps`
 
-## `/new-project` wizard
+## `/new-project`
 
-Interactive inputs: project id, name, description, goal, owner, primary repo, additional repos, current focus, constraints, assumptions, next steps, tags.
+`/new-project` collects a name (and optional description / Jira key) via quick
+prompts, then **kicks off the `new-project` skill** (a cogitator skill package).
+The skill — not TypeScript scaffolding — creates `<slug>.md` from the house format
+and adds an `INDEX.md` entry under the appropriate section, then reports the slug so
+you can load it with `/project`.
 
-Creates `project.json`, `state.md` (from template), `artifacts/`, and `repoContexts/` under the control root, then activates the project for the current session.
-
-## Shutdown checkpoint persistence
+## Shutdown checkpoint persistence (artifacts-only)
 
 On session shutdown, `writeProjectShutdownCheckpoint()` in `project-state.ts`:
-1. Builds a status snapshot by parsing `state.md`
-2. Writes `artifacts/latest-shutdown.md` with timestamps, mode, proposals, and project status
-3. Upserts a `## Session Shutdown Checkpoint` block into `state.md`
+1. Builds a status snapshot by parsing the state file (read-only).
+2. Writes `artifacts/<slug>/latest-shutdown.md` with timestamps, mode, proposals, and status.
+
+Cogitator **never writes into the state file** — no checkpoint block is injected —
+so it never conflicts with your Jira sync. On resume, the rolling shutdown artifact
+is read for the latest checkpoint.
 
 ## Session storage
 
-Persistent session files live at `<control-root>/sessions/`. This is separate from `~/.pi/agent` which holds pi config/auth only.
+Persistent `cogi` session files live under the control root at
+`<control-root>/sessions/` (default `~/.local/share/cogitator/sessions`, set with
+`--control-root`). The control root is now only cogitator runtime state (sessions +
+its `.gitignore`); it no longer holds project records. `~/.pi/agent` holds pi
+config/auth only.

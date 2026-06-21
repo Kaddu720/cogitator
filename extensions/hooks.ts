@@ -13,7 +13,7 @@
  * Import direction: workflow-mode.ts → hooks.ts (never the reverse).
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // ─── Per-event return types ────────────────────────────────────────────────────
 

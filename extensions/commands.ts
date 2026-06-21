@@ -11,7 +11,7 @@
  * Import direction: workflow-mode.ts → commands.ts (never the reverse).
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export type CommandHandler = (args: unknown, ctx: ExtensionContext) => Promise<void> | void;
 export type ShortcutHandler = (ctx: ExtensionContext) => Promise<void> | void;
@@ -20,8 +20,6 @@ export interface CommandHandlers {
   project: CommandHandler;
   "new-project": CommandHandler;
   "project-status": CommandHandler;
-  "add-repo": CommandHandler;
-  "delete-project": CommandHandler;
   "weekly-summary": CommandHandler;
   "approval-status": CommandHandler;
   reject: CommandHandler;
@@ -55,23 +53,13 @@ export function registerCommands(
   });
 
   pi.registerCommand("new-project", {
-    description: "Create a new cogitator project with an interactive wizard",
+    description: "Create a new project (kicks off the new-project skill to scaffold the state file + INDEX entry)",
     handler: commands["new-project"],
   });
 
   pi.registerCommand("project-status", {
     description: "Show the active project and workflow mode",
     handler: commands["project-status"],
-  });
-
-  pi.registerCommand("add-repo", {
-    description: "Add a linked repository to the active project",
-    handler: commands["add-repo"],
-  });
-
-  pi.registerCommand("delete-project", {
-    description: "Delete a Cogitator project scaffold without touching linked repositories",
-    handler: commands["delete-project"],
   });
 
   pi.registerCommand("weekly-summary", {

@@ -14,7 +14,7 @@
  * deps.updateStatus(ctx).
  */
 
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type PendingProposal, type ProposalStatus } from "./types.js";
 import { normalizeInputPath } from "./parse.js";
 import { isProposalActionable, transitionProposalStatus } from "./policy.js";

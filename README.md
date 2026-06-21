@@ -1,158 +1,105 @@
 # cogitator
 
-Sandboxed `pi` launcher for Linux using `bubblewrap`, with a macOS Seatbelt (`sandbox-exec`) path, plus a bundled workflow-mode extension for project-aware sessions.
+`pi` launcher with process isolation provided by [Gondolin](https://github.com/earendil-works/gondolin) (a local QEMU micro-VM), plus a bundled workflow-mode extension for project-aware sessions.
+
+Isolation is no longer done by wrapping `pi` in an OS sandbox. Instead, `cogi` runs `pi` directly on the host and registers the Gondolin pi extension, which routes `pi`'s `read`/`write`/`edit`/`bash` tools into a micro-VM with the workspace mounted at `/workspace`. Gondolin runs on both Linux and macOS (QEMU backend).
 
 ## Documentation
 
 Detailed reference docs live in `docs/`:
 
-- [Architecture](docs/architecture.md) — module map, import rules, runtime state, directory boundaries, sandbox model
+- [Architecture](docs/architecture.md) — module map, import rules, runtime state, directory boundaries, isolation model
 - [Approval Flow](docs/approval-flow.md) — proposal lifecycle, per-change approval, sequence gating, mode interactions
-- [Project Model](docs/project-model.md) — control root structure, project.json schema, state template, linked repos, shutdown checkpoints
+- [Project Model](docs/project-model.md) — markdown-first project states, INDEX.md selection, artifacts, artifacts-only shutdown checkpoints
 - [Mode System](docs/mode-system.md) — available modes (plan, normal, readonly, creative), descriptors, write policies, tool allowlists
 - [Testing](docs/testing.md) — running unit tests, test structure, coverage targets
 
 ## What this flake provides
 
-- `cogi` for Level 2-style sandboxing on Linux via `bubblewrap` and on macOS via Seatbelt (`/usr/bin/sandbox-exec`)
-- flake-provided runtime tools on both platforms, including `git`, `gh`, `ffmpeg`, `yt-dlp`, `node`, and `python`
-- `cogitator-init-project` to bootstrap a project in the control root
-- platform-specific isolation semantics: Linux uses namespace/bind-mount sandboxing, while macOS uses policy-based file/network restrictions
+- `cogi`, a host launcher that runs `pi` with the Gondolin micro-VM extension registered for process isolation
+- `pi` built from `@earendil-works/pi-coding-agent` (the upstream pi), run on `nodejs_24` (Gondolin requires Node ≥ 23.6)
+- `qemu` and the other flake-provided runtime tools (`git`, `gh`, `ffmpeg`, `yt-dlp`, `node`, `python`)
+- bundled pi packages registered in the agent `settings.json`: `pi-web-access`, the `pi-mcp-adapter` (MCP bridge), the `ponytail` skill, and a cogitator `new-project` skill
 - an overlay exposing:
   - `pkgs.cogitator`
-  - `pkgs.cogitator-init-project`
 - a bundled extension that adds:
   - `/project`
   - `/project-status`
   - `/new-project`
-  - `/add-repo`
   - `/plan`
   - `/readonly`
   - `/normal`
+  - `/creative`
+  - `/weekly-summary`
 - startup project selection at pi startup
 - a transactional approval gate for file mutations based on your proposal workflow
 - plan mode that keeps repo/code work read-only while still allowing project state + artifact updates
 - explicit blocking of the `sops` command
-- stronger secret handling using protected mounted secret files and in-memory provider registration
+- secret handling that stages provider API keys into the per-run agent dir and registers providers in-memory (keys are not exported into the shell environment)
+- a `nix run .#test` app and `nix develop` shell that run the extension unit tests with the pi packages available
 
-## Platform notes
+## Isolation model
 
-- Linux keeps the existing `bubblewrap` sandbox model with a synthetic filesystem view and read-only `/nix/store`.
-- macOS runs `pi` under Apple Seatbelt with a generated temporary sandbox profile via `/usr/bin/sandbox-exec`.
-- The macOS path is intentionally narrower in scope than Linux `bubblewrap`: it is policy-based isolation, not namespace-based filesystem virtualization.
-- On macOS, expect some tool-specific edge cases around file watchers, subprocess behavior, Mach services, and network policy details.
+Process isolation is provided by **Gondolin**, a local QEMU micro-VM, wired in as a `pi` extension:
 
-## Registry layout
+- `cogi` runs `pi` directly on the host — there is no `bubblewrap` or Seatbelt wrapper.
+- The Gondolin extension overrides `pi`'s `read`/`write`/`edit`/`bash` tools (and `!` commands) so they execute inside the micro-VM, with the workspace mounted read-write at `/workspace`.
+- It boots on `session_start`; guest images (~200 MB) are fetched and cached on first use, so the first run needs network and may be slow.
+- Works on Linux and macOS via the QEMU backend (`qemu` is on the runtime path). On Linux, KVM acceleration is used when available.
+- Gondolin updates independently via `nix flake update gondolin` (it is pinned to a release tag; bump the tag and the package hashes to upgrade).
 
-Default control root:
+## Project model (markdown-first)
+
+Cogitator reads projects from a flat directory of markdown state files — there is no
+`project.json` and no central control root for project records. See
+[docs/project-model.md](docs/project-model.md) for the full model.
+
+Default project states directory (override with `COGITATOR_PROJECT_STATES_DIR` or
+`cogi --project-states-dir PATH`):
 
 ```text
-/home/kaddu/.local/share/cogitator/
+~/Projects/projectStates/
+  INDEX.md                 # curated index: names, statuses, ordering, meta-projects
+  ARCHIVE.md               # completed projects (not offered for selection)
+  <project-slug>.md        # one markdown state file per project (the source of truth)
+  artifacts/
+    <project-slug>/
+      latest-shutdown.md   # rolling session checkpoint (written by cogitator)
 ```
 
-Expected project layout:
+- Each `*.md` (except `INDEX.md`/`ARCHIVE.md`) is a project; its id is the filename slug.
+- These files are typically Jira-synced and owned by you; cogitator reads them and
+  never injects its own blocks into them.
 
-```text
-/home/kaddu/.local/share/cogitator/
-  .gitignore
-  projects/
-    <project-id>/
-      project.json
-      state.md
-      artifacts/
-      repoContexts/
-```
+The **control root** (`~/.local/share/cogitator`, set with `--control-root`) now only
+holds cogitator runtime state — persistent `sessions/` and a `.gitignore`. `cogi`
+creates it and the `.gitignore` automatically if missing.
 
-Template and shared resource files included here:
-
-- `/home/kaddu/.config/cogitator/resources/templates/project-template.json`
-- `/home/kaddu/.config/cogitator/resources/templates/project-state-template.md`
-- `/home/kaddu/.config/cogitator/resources/prompts/`
-
-You can also generate a new project scaffold automatically with:
-
-```bash
-nix run .#cogitator-init-project -- my-project-id \
-  --name "My Project" \
-  --repo /path/to/repo
-```
-
-A control-root `.gitignore` template is also included here:
-
-- `/home/kaddu/.config/cogitator/control-root.gitignore`
-
-`cogi` will automatically create `<control-root>/.gitignore` if it is missing, with default ignores for:
-
-- `projects/`
-- `uploads/`
-
-### `project.json`
-
-Each project can link multiple repos.
-
-Example:
-
-```json
-{
-  "id": "govcloud-wave-1",
-  "name": "GovCloud Wave 1",
-  "description": "Migration planning and execution tracking",
-  "stateFile": "state.md",
-  "artifactsDir": "artifacts",
-  "repos": [
-    {
-      "path": "/home/kaddu/projects/bitbucket/vsi-infrastructure-platform",
-      "name": "vsi-infrastructure-platform",
-      "role": "primary"
-    },
-    {
-      "path": "/home/kaddu/projects/bitbucket/vsi-azuregov",
-      "name": "vsi-azuregov",
-      "role": "supporting"
-    }
-  ],
-  "repoContexts": [
-    "repoContexts/vsi-infrastructure-platform-private.md"
-  ],
-  "tags": ["govcloud", "terraform"]
-}
-```
+> Note: the `cogitator-init-project` helper predates this model (it scaffolds the old
+> `project.json` layout, which is now ignored). Prefer `/new-project`.
 
 ## Startup behavior
 
 When pi starts:
 
-- it looks under `projects/*/project.json`
-- it detects the current repo root if one is mounted
-- it prompts you to choose a project
-- projects linked to the current repo are shown first
-- the selected project's `state.md` is loaded into agent context before turns
-- configured `repoContexts` are also loaded into context
+- it scans the project states directory and parses `INDEX.md` for names, statuses, and ordering
+- it prompts you to choose a project (INDEX order first; archived hidden)
+- the selected project's state file is loaded into agent context before turns
 
-The selected project is persisted in the pi session, so session resume/tree navigation restores it.
+The selected project (its slug) is persisted in the pi session, so resume/tree
+navigation restores it. Preselect non-interactively with `--project-id <slug>`.
 
-Cogitator intentionally separates replicated config assets from host-local runtime state:
+Config/runtime separation:
 
-- `.config/cogitator/resources/prompts/` stores shared prompt fragments that are versioned with the Cogitator config and replicated across machines.
-- `.config/cogitator/resources/templates/` stores shared reusable templates such as the canonical project-state template.
-- `~/.pi/agent` remains the host-side home for pi config such as `settings.json`, `models.json`, and optional auth.
-- `<control-root>/sessions/` stores persistent `cogi` session files.
-- `<control-root>/projects/` stores host-local project records, artifacts, and repo context files.
-- the model sees the workspace, linked repos, and the mounted Cogitator control-root view, but not your full host `~/.pi` directory.
+- `.config/cogitator/resources/prompts/` — shared prompt fragments, versioned with the config.
+- `~/.pi/agent` — host pi config (`settings.json`, `models.json`, optional auth).
+- `<control-root>/sessions/` — persistent `cogi` session files.
+- the per-run agent dir (with staged secrets) lives outside the workspace and is not exposed to the Gondolin guest.
 
-You can create a new project interactively with `/new-project`. The wizard collects the project id, project name, description, goal, owner, primary repo path, additional repo paths, initial focus items, constraints, assumptions, next steps, and optional tags. It then creates:
-
-```text
-<control-root>/projects/<project-id>/
-  project.json
-  state.md
-  artifacts/
-  repoContexts/
-```
-
-The new project is selected immediately for the current session.
-
-You can add another linked repository during an interactive session with `/add-repo`. This updates the active project's `project.json` immediately, but because `bwrap` mounts are fixed when `cogi` starts, you must restart `cogi` before the newly linked repo becomes accessible inside the sandbox. The same restart rule applies when `/new-project` links repositories that are not already visible in the current sandbox.
+You create a new project with `/new-project`: it collects a name (and optional
+description / Jira key), then **kicks off the bundled `new-project` skill**, which
+scaffolds `<slug>.md` from your house format and adds an `INDEX.md` entry. (There is
+no `/add-repo` — the markdown-first model has no structured repo links.)
 
 ## Modes
 
@@ -168,8 +115,8 @@ You can add another linked repository during an interactive session with `/add-r
 - allows analysis/planning behavior
 - allows only safe read-only `bash`
 - allows `write`/`edit` only for the active project's:
-  - `state.md`
-  - `artifacts/**`
+  - state file (`<slug>.md`)
+  - `artifacts/<slug>/**`
 - also allows Jira closeout drafts under:
   - `/tmp/jira-closeout-<ISSUE-KEY>.txt`
 
@@ -221,7 +168,7 @@ Basic checks we have been using during refactors:
    - expected: blocked by the transactional approval gate with `No approved proposal matches this path.`
 6. Run `/readonly`, then attempt a mutation.
    - expected: mutation tools are unavailable or the mutation is blocked because read-only mode disables file changes
-7. Exit `cogi` and inspect `<control-root>/projects/<id>/artifacts/latest-shutdown.md`.
+7. Exit `cogi` and inspect `<project-states-dir>/artifacts/<slug>/latest-shutdown.md`.
    - expected: fresh `saved_at` timestamp and the current mode/session info are persisted
 
 These checks are intentionally small and safe. When testing writes, prefer tiny artifact-only attempts or blocked repo-path attempts so validation does not leave accidental code changes behind.
@@ -234,26 +181,15 @@ From this directory:
 nix run . -- --help
 ```
 
-Bootstrap a new project under the default control root:
-
-```bash
-nix run .#cogitator-init-project -- my-project-id \
-  --name "My Project" \
-  --description "Short description" \
-  --repo /path/to/repo-one \
-  --repo /path/to/repo-two \
-  --tag infra
-```
-
-Run sandboxed pi in the current repo:
+Run pi in the current repo:
 
 ```bash
 nix run .#cogi -- --workspace "$PWD"
 ```
 
-When an active project is selected, `cogi` also mounts every existing repository listed in that project's `project.json` on startup.
+The workspace is mounted into the Gondolin guest at `/workspace`. When an active project is selected, its state file is loaded into agent context. Create new projects from inside a session with `/new-project`.
 
-Use host pi auth inside the sandbox so existing `~/.pi/agent/auth.json` credentials work, or so `/login` persists across runs:
+Use host pi auth so existing `~/.pi/agent/auth.json` credentials work, or so `/login` persists across runs:
 
 ```bash
 nix run .#cogi -- --workspace "$PWD" --host-pi-auth
@@ -273,31 +209,24 @@ Preselect a project without the startup picker:
 nix run .#cogi -- --workspace "$PWD" --project-id govcloud-wave-1
 ```
 
-## Stronger secret architecture
+## Secret architecture
 
-The current design avoids exporting provider API keys into normal shell environment variables.
-
-Instead:
+The design avoids exporting provider API keys into normal shell environment variables.
 
 1. `sops-nix` decrypts secrets to host files.
-2. `cogi` mounts only those specific files into the sandbox under:
-
-```text
-/run/cogitator-secrets/
-```
-
-3. The bundled extension reads provider config from a protected runtime file.
-4. The bundled extension reads mounted API key files into memory and registers providers directly with pi.
-5. The bundled `bash` tool scrubs the secret-config environment before spawning shell commands.
-6. Model-facing tools are blocked from protected secret paths.
+2. `cogi` stages only those specific files into the per-run agent dir (a fresh `mktemp -d`, removed on exit) under `secrets/`.
+3. The generated `pi` `models.json` references each key with `!cat "$PI_CODING_AGENT_DIR/secrets/provider-<id>.key"`, so `pi` reads the keys into memory and registers providers directly.
+4. The bundled `bash` tool scrubs the secret-config environment before spawning shell commands.
+5. The `sops` command is blocked in `bash` in all modes.
 
 Result:
 
-- pi runtime can use the keys
-- the model tools cannot read the protected secret files
+- the `pi` runtime can use the keys
+- keys are never written into the workspace or exported as plaintext env vars
+- because the agent dir lives outside the workspace, it is not mounted into the Gondolin guest, so VM-routed tools cannot read it
 - child shell processes do not inherit the secret-config environment variables
 
-For portable local development, `--host-pi-auth` is also available as an opt-in runtime path. It binds host `~/.pi` into sandbox HOME so standard pi auth (`~/.pi/agent/auth.json` or `/login`) works without embedding provider secrets into this repo.
+For portable local development, `--host-pi-auth` is also available as an opt-in runtime path. It reuses host `~/.pi/agent` auth so standard pi auth (`~/.pi/agent/auth.json` or `/login`) works without embedding provider secrets into this repo.
 
 ### Overlay and factory inputs for Nix / sops-nix
 
@@ -315,7 +244,7 @@ You can call the factory from your main flake with:
 
 - `plainEnv` for non-secret values
 - `providerConfigs` for provider URLs and secret file paths
-- `secretEnvFiles` for additional protected files you may want mounted under `/run/cogitator-secrets/`
+- `secretEnvFiles` for additional protected files you want staged into the per-run agent dir under `secrets/`
 
 Conceptual example from a Home Manager / `sops-nix` environment:
 
@@ -355,35 +284,37 @@ If you just want the default package without host-specific provider wiring, you 
 ```nix
 {
   nixpkgs.overlays = [ inputs.cogitator.overlays.default ];
-  home.packages = [ pkgs.cogitator pkgs.cogitator-init-project ];
+  home.packages = [ pkgs.cogitator ];
 }
 ```
 
 The key point is that `apiKeyFile` is a host secret file path from `sops-nix`, not a plaintext token value in Nix.
 
-## Sandbox defaults
+## Launcher defaults
 
-Default sandbox behavior:
+`cogi` runs `pi` on the host and:
 
-- mounts `/nix/store` read-only
-- mounts the selected workspace read-write
-- mounts every existing repo listed in the active project's `project.json` when a project is selected or preselected
-- exposes only a synthetic view of the control root inside the sandbox
-- mounts repo-matching project directories from `<control-root>/projects/` into that synthetic control root
-- mounts `<control-root>/sessions/` so `cogi` session history persists across restarts
-- does not expose unrelated project state directories from the control root
-- does not expose your full `~/.pi` config directory to the model
-- does not expose your home directory unless you explicitly bind parts of it
-- does not expose host `/var` or `/run`
-- isolates `HOME` to `/tmp/home`
-- uses private `/tmp`
-- disables network unless `--net` is passed
+- prepares a per-run agent dir (merged `settings.json`/`models.json`/`keybindings.json` from host `~/.pi/agent` + cogitator config, plus staged provider secrets)
+- registers the workflow extension, `pi-web-access`, `pi-mcp-adapter`, the `ponytail` and `new-project` skills, and the Gondolin micro-VM extension via the agent `settings.json` `packages` list
+- exports `PI_CACHE_RETENTION=long` (overridable) for 1-hour prompt-cache retention on supporting models, matching Claude Code's extended-cache behavior
+- persists session history under `<control-root>/sessions/` so it survives restarts
+- loads the selected project's state file into agent context
+
+Filesystem/network isolation is the Gondolin guest's job (workspace mounted at `/workspace`), not `cogi`'s; see [docs/project-model.md](docs/project-model.md).
+
+### MCP servers
+
+`pi-mcp-adapter` bridges MCP servers into pi as tools. It reads standard MCP config
+at runtime — `.mcp.json` in the workspace, `~/.config/mcp/mcp.json`, or pi-owned
+overrides — so an existing config (e.g. the Ship MCP server) is picked up without
+duplicating it here, and any embedded credentials stay in those host files rather
+than in this repo.
 
 ## Important note on enforcement
 
-The `bwrap` sandbox protects the host OS and limits visible paths.
+Process isolation comes from the **Gondolin micro-VM**: VM-routed tool calls cannot touch the host filesystem outside `/workspace`, and network egress is subject to Gondolin's policy layer.
 
-The bundled pi extension does several different jobs:
+The bundled pi extension does several different jobs inside `pi`:
 
 - project selection and project-state context loading
 - mode enforcement for `/readonly` and `/plan`
@@ -393,64 +324,38 @@ The bundled pi extension does several different jobs:
 
 That means:
 
-- OS protection comes from `bwrap`
-- workflow/write-policy protection inside pi comes from the extension
-- file approval now has an actual stateful gate, not just prompt guidance
+- OS/process protection comes from Gondolin
+- workflow/write-policy protection inside `pi` comes from the extension
+- file approval has an actual stateful gate, not just prompt guidance
 
-## Bootstrap helper details
+## Creating projects
 
-`cogitator-init-project` creates:
+Use `/new-project` from inside a session. It collects a name (and optional
+description / Jira key), then kicks off the bundled `new-project` skill, which
+creates `<project-states-dir>/<slug>.md` in your house format and adds an `INDEX.md`
+entry under the right section. Load it with `/project`.
 
-```text
-<control-root>/projects/<project-id>/
-  project.json
-  state.md
-  artifacts/
-  repoContexts/
-```
+> The legacy `cogitator-init-project` CLI predates the markdown-first model and
+> scaffolds the old `project.json` layout (now ignored); don't use it.
 
-It also creates `<control-root>/.gitignore` if missing.
-
-The interactive `/new-project` command creates the same scaffold from inside `cogi`, but also prompts for initial state-file content, uses the shared canonical template at `/home/kaddu/.config/cogitator/resources/templates/project-state-template.md`, and automatically switches the current session to the new project.
-
-Wizard inputs for `/new-project`:
-
-- project id
-- project name
-- description
-- goal
-- owner
-- primary repo path
-- additional repo paths
-- current focus items
-- constraints
-- assumptions
-- next steps
-- tags
-
-Shared resources under `resources/` are intended for shared templates, prompt fragments, and other reusable configuration that should apply across projects rather than living under a single project's `artifacts/` directory. `extensions/workflow-mode.ts` now loads prompt guidance for approval workflow, secret handling, modes, and project-context review from `resources/prompts/` at runtime.
-
-Useful flags:
-
-- `--control-root PATH`
-- `--repo PATH` (repeatable)
-- `--tag TAG` (repeatable)
-- `--context PATH` (repeatable, relative to the project dir)
-- `--force`
+Shared resources under `resources/` hold reusable templates and prompt fragments.
+`extensions/workflow-mode.ts` loads prompt guidance for the approval workflow, secret
+handling, modes, project-context review, and targeted file access from
+`resources/prompts/` at runtime.
 
 ## Testing
 
-Run unit tests (requires `tsx`):
+The flake provides the pi packages the extensions import, so the unit tests run without a manual `npm install`. From the repo root:
 
 ```bash
-npx tsx extensions/tests/unit.ts
+nix run .#test
 ```
 
-See [docs/testing.md](docs/testing.md) for details on test structure and coverage.
+Or drop into a dev shell (`nodejs_24`, `tsx`, and a `cogitator-test` command) and iterate:
 
-## Extra binds
+```bash
+nix develop
+cogitator-test
+```
 
-If `pi` or a tool later needs additional host files, add them explicitly with:
-
-- `--bind-ro`
-- `--bind-rw`
+Both run `extensions/tests/unit.ts` against the working tree. If you prefer to run `tsx` yourself, you need `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` resolvable and `"type": "module"` in scope. See [docs/testing.md](docs/testing.md) for test structure and coverage.

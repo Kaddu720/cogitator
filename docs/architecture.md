@@ -13,8 +13,8 @@ Cogitator is a pi extension that provides project-aware sessions, mode enforceme
 | `hooks.ts` | All `pi.on` calls and per-event return-type aliases. |
 | `runtime.ts` | `Mode` type (`normal \| readonly \| plan \| creative`), `persistMode`, `restoreMode` (includes legacy `architect`→`plan` and `executor`→`normal` mapping), `persistProjectSelection`, `restoreStoredProjectId`. |
 | `resources.ts` | Prompt fragment loading, bash safety, mode tool allowlists, `ModeDescriptor` map (4 entries: plan, normal, readonly, creative), display formatters. |
-| `projects.ts` | Project record types, loading, scaffolding, path resolution, context building. |
-| `project-state.ts` | State markdown parsing, weekly summaries, shutdown checkpoint persistence. |
+| `projects.ts` | Markdown-first project store: `ProjectRecord`, `loadProjects` (project-states dir + `INDEX.md`), path resolution, context building, `new-project` scaffolding helper. |
+| `project-state.ts` | Tolerant state-markdown parsing, weekly summaries, artifacts-only shutdown checkpoint. |
 | `approvals/types.ts` | Shared types: `ProposalStatus`, `PendingProposal`, `StoredApprovalGateState`. |
 | `approvals/parse.ts` | Proposal extraction from assistant text, path normalization, ID generation. |
 | `approvals/format.ts` | Pure display-string formatters for proposals. |
@@ -59,36 +59,30 @@ interface WorkflowRuntimeState {
 |------|---------|
 | `~/.config/cogitator` | Repo: extension code, flake, resources, docs |
 | `~/.pi/agent` | Host pi config and auth (settings.json, auth.json, models.json) |
-| `~/.local/share/cogitator` | Mutable control root: projects, sessions, uploads |
-| `~/.local/share/cogitator/projects/<id>/` | Per-project: project.json, state.md, artifacts/, repoContexts/ |
+| `~/Projects/projectStates` | Project state files + `INDEX.md` (default; `COGITATOR_PROJECT_STATES_DIR` / `--project-states-dir`) |
+| `~/Projects/projectStates/artifacts/<slug>/` | Per-project artifacts incl. `latest-shutdown.md` |
+| `~/.local/share/cogitator` | Control root: cogitator runtime state (sessions + `.gitignore`) |
 | `~/.local/share/cogitator/sessions/` | Persistent cogi session files |
 
-## Sandbox model
+Per-run, `cogi` also builds a temporary agent dir (`mktemp -d`) holding merged
+`settings.json`/`models.json` and staged provider secrets; it is removed on exit.
 
-`cogi` uses a platform-specific OS sandbox:
+## Isolation model
 
-### Linux
+Process isolation is provided by **Gondolin** (a local QEMU micro-VM), wired in as
+a pi extension — not by wrapping `pi` in an OS sandbox. `cogi` runs `pi` directly on
+the host; there is no `bubblewrap` or Seatbelt.
 
-On Linux, `cogi` uses `bubblewrap` (`bwrap`) to create a sandboxed environment:
+- The Gondolin extension overrides `pi`'s `read`/`write`/`edit`/`bash` tools (and `!`
+  commands) so they execute inside the micro-VM, with the workspace mounted at
+  `/workspace`. It boots on `session_start`; guest images (~200 MB) are fetched and
+  cached on first use.
+- Runs on Linux and macOS via the QEMU backend (`qemu` is on the runtime path);
+  KVM acceleration is used on Linux when available.
+- The agent dir (with staged secrets) lives outside the workspace, so VM-routed
+  tools cannot read it.
 
-- `/nix/store` mounted read-only
-- Workspace and linked repos mounted read-write
-- Control root mounted with a synthetic view (only matching project dirs + sessions)
-- `HOME` isolated to `/tmp/home`
-- Private `/tmp`
-- Network disabled by default (use `--net` to enable)
-- Host `~/.pi/agent` config imported but full `~/.pi` not exposed
-
-### macOS
-
-On macOS, `cogi` generates a temporary Seatbelt profile and runs `pi` via `/usr/bin/sandbox-exec`:
-
-- File access is policy-based rather than namespace-based
-- Workspace, linked repos, control root, sessions, and generated agent files are explicitly allowed
-- `HOME` and `TMPDIR` are redirected into a temporary runtime directory
-- The sandbox can restrict reads and writes, but it does not provide Linux-style bind-mount filesystem virtualization
-- Host `~/.pi/agent` config is still merged into generated runtime files without exposing the full host `~/.pi`
-
-### Isolation caveat
-
-The Linux and macOS sandboxes are not equivalent. Linux provides stronger filesystem-shaping semantics through namespaces and bind mounts; macOS Seatbelt provides policy enforcement with different compatibility and observability tradeoffs.
+What protects what:
+- **OS/process isolation** comes from Gondolin.
+- **Workflow/write-policy** (modes, the transactional approval gate, `sops` blocking,
+  targeted-read discipline) comes from this extension, inside `pi`.

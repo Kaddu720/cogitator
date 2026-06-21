@@ -42,9 +42,21 @@ export function summarizeItems(items: string[], maxChars = 240): string {
 // ─── Markdown section extraction ────────────────────────────────────────────────
 
 function extractMarkdownSection(markdown: string, heading: string): string {
-  const pattern = new RegExp(`^## ${escapeRegExp(heading)}\\n([\\s\\S]*?)(?=^##\\s|$)`, "m");
+  // No `/m` flag: with multiline mode `$` matches every line end, so a lazy
+  // capture would stop after the first line. `(?:^|\n)` anchors the heading at a
+  // line start; the capture runs to the next `## ` heading or end of document.
+  const pattern = new RegExp(`(?:^|\\n)## ${escapeRegExp(heading)}\\n([\\s\\S]*?)(?=\\n## |$)`);
   const match = markdown.match(pattern);
   return match?.[1]?.trim() ?? "";
+}
+
+const SNAPSHOT_STATUS_TOKENS = ["in_progress", "todo", "blocked", "done", "deferred"] as const;
+
+/** Find the first lifecycle status token near a `status:` label, tolerant of
+ *  `- Status: x`, `Status: **x**`, and `- status: \`x\`` formats. */
+function extractStatusToken(text: string): string {
+  const pattern = new RegExp(`status[\`*:\\s]*\\b(${SNAPSHOT_STATUS_TOKENS.join("|")})\\b`, "i");
+  return text.match(pattern)?.[1]?.toLowerCase() ?? "";
 }
 
 function extractTopLevelBulletValue(sectionText: string, label: string): string {
@@ -142,7 +154,7 @@ export function buildProjectStatusSnapshot(stateText: string): ProjectStatusSnap
   const hasProgressTracking = progressTracking.trim().length > 0;
 
   return {
-    executiveStatus: extractTopLevelBulletValue(executiveSummary, "Status") || checkpointSnapshot.executiveStatus || "[unknown]",
+    executiveStatus: extractStatusToken(executiveSummary) || extractTopLevelBulletValue(executiveSummary, "Status") || checkpointSnapshot.executiveStatus || "[unknown]",
     goal: extractTopLevelBulletValue(executiveSummary, "Goal") || checkpointSnapshot.goal || "[none]",
     currentFocus: directCurrentFocus.length > 0 ? directCurrentFocus : (checkpointSnapshot.currentFocus ?? []),
     nextSteps: directNextSteps.length > 0 ? directNextSteps : (checkpointSnapshot.nextSteps ?? []),
@@ -294,15 +306,8 @@ export async function writeProjectShutdownCheckpoint(input: ShutdownCheckpointIn
   ].join("\n");
   await mkdir(artifactsPath, { recursive: true });
   await writeFile(artifactPath, artifactContent, "utf8");
-  const checkpointBody = [
-    `- saved_at: ${timestamp}`, `- mode: ${mode}`, `- session_file: ${sessionFile}`,
-    `- repo_root: ${repoRoot ?? "[none]"}`, `- pending_proposals: ${proposals.length}`,
-    `- actionable_approval_steps: ${actionableProposalCount}`, `- proposal_status_counts: ${formatProposalStatusCounts(proposals)}`,
-    `- executive_status: ${statusSnapshot.executiveStatus}`, `- goal: ${summarizeInline(statusSnapshot.goal)}`,
-    `- current_focus: ${summarizeItems(statusSnapshot.currentFocus)}`, `- progress_counts: ${progressCounts}`,
-    `- next_steps: ${summarizeItems(statusSnapshot.nextSteps)}`, `- artifact: ${artifactPath}`,
-  ].join("\n");
-  await writeFile(statePath, upsertShutdownCheckpointSection(stateText, checkpointBody), "utf8");
+  // The checkpoint is written to the artifact only. The (Jira-synced) state file
+  // is never mutated by cogitator; on resume we read this artifact instead.
 }
 
 /**
