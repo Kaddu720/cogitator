@@ -1,5 +1,4 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { type Mode, persistMode, restoreMode, persistProjectSelection, restoreStoredProjectId } from "./runtime.js";
@@ -563,10 +562,6 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
   };
 
   registerCommands(pi, commandHandlers, shortcutHandlers);
-
-  const makeBashTool = (cwd: string) => createBashTool(cwd, { spawnHook: ({ command, cwd, env }) => ({ command, cwd, env: { ...env } }) });
-  const baseBashTool = makeBashTool(process.cwd());
-  pi.registerTool({ ...baseBashTool, execute: async (id, params, signal, onUpdate, ctx) => { const tool = makeBashTool(getResolutionBase(ctx.cwd, state.activeRepoRoot)); return tool.execute(id, params, signal, onUpdate); } });
 
   // ─── Lifecycle hook implementations ───────────────────────────────────────────
 
