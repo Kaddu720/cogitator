@@ -36,7 +36,7 @@
         lib = pkgs.lib;
         isLinux = pkgs.stdenv.isLinux;
 
-        defaultControlRoot = "/home/kaddu/.local/share/cogitator";
+        defaultControlRoot = "$HOME/.local/share/cogitator";
         # Reference the entry within the flake source tree (via self) so its
         # sibling modules (./commands.js, …) and ../resources/ are present next to
         # it, and the store reference carries proper context (no toString warning).
