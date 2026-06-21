@@ -445,8 +445,11 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     const NEW_PROJECT = "+ New project…";
     const NO_PROJECT = "No project";
 
+    const INACTIVE = new Set(["done", "deferred"]);
+    const active = projects.filter((p) => !p.status || !INACTIVE.has(p.status));
+
     // INDEX.md order (active first); no repo matching in the markdown-first model.
-    const options = projects.map((p) => `(${p.id}) ${p.name}${p.status ? ` · ${p.status}` : ""}`);
+    const options = active.map((p) => `(${p.id}) ${p.name}${p.status ? ` · ${p.status}` : ""}`);
     options.push(NEW_PROJECT, NO_PROJECT);
 
     if (!ctx.hasUI) { await setActiveProject(null, ctx, false); return; }
@@ -455,7 +458,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     if (choice === NEW_PROJECT) { await commandHandlers["new-project"]("", ctx); return; }
     if (!choice || choice === NO_PROJECT) { await setActiveProject(null, ctx); return; }
     const index = options.indexOf(choice);
-    await setActiveProject(projects[index] ?? null, ctx);
+    await setActiveProject(active[index] ?? null, ctx);
   }
 
   // ─── Command handler implementations ─────────────────────────────────────────
