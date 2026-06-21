@@ -66,15 +66,23 @@ export function getIndexPath(): string {
 
 // ─── Shared path utilities ─────────────────────────────────────────────────────
 
+/** Canonical workspace root inside the Gondolin VM. */
+export const VM_WORKSPACE_ROOT = "/workspace";
+
 export function getResolutionBase(cwd: string | undefined, repoRoot?: string): string {
   if (typeof cwd === "string") {
     const trimmed = cwd.trim();
-    if (trimmed.length > 0 && trimmed !== "undefined") return trimmed;
+    if (trimmed.length > 0 && trimmed !== "undefined") {
+      // The extension process runs on the host; remap host-side paths to the VM mount.
+      const hostRoot = process.cwd();
+      if (trimmed === hostRoot) return VM_WORKSPACE_ROOT;
+      if (trimmed.startsWith(`${hostRoot}/`)) return `${VM_WORKSPACE_ROOT}${trimmed.slice(hostRoot.length)}`;
+      return trimmed;
+    }
   }
   if (repoRoot) return repoRoot;
-  const processCwd = process.cwd();
-  if (processCwd) return processCwd;
-  return getProjectStatesDir();
+  // Cogitator always runs in the Gondolin VM; /workspace is the canonical mount.
+  return VM_WORKSPACE_ROOT;
 }
 
 export function resolveFrom(base: string | undefined, path: string, repoRoot?: string): string {

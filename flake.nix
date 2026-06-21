@@ -773,7 +773,17 @@ PY
               agent_dir_host="$(mktemp -d)"
               agent_secrets_dir="$agent_dir_host/secrets"
               mkdir -p "$agent_secrets_dir"
-              trap 'if [[ -n "$host_pi_auth_json" && -e "$agent_dir_host/auth.json" ]]; then cp "$agent_dir_host/auth.json" "$host_pi_auth_json"; fi; rm -rf "$agent_dir_host"' EXIT
+              trap '
+                if [[ -n "$host_pi_agent_dir" ]]; then
+                  for f in "$agent_dir_host"/*; do
+                    [[ -f "$f" ]] || continue
+                    base="$(basename "$f")"
+                    case "$base" in cogitator-*.json|secrets) continue ;; esac
+                    cp "$f" "$host_pi_agent_dir/$base"
+                  done
+                fi
+                rm -rf "$agent_dir_host"
+              ' EXIT
 ${renderSecretStagingLines secretBindings}
               cat > "$agent_dir_host/cogitator-models.json" <<'EOF'
 ${builtins.toJSON piModelsConfig}
@@ -893,8 +903,13 @@ with open(sys.argv[3], "w", encoding="utf-8") as handle:
     json.dump(result, handle, indent=2)
     handle.write("\n")
 PY
-              if [[ -n "$host_pi_auth_json" && -e "$host_pi_auth_json" ]]; then
-                cp "$host_pi_auth_json" "$agent_dir_host/auth.json"
+              if [[ -n "$host_pi_agent_dir" ]]; then
+                for f in "$host_pi_agent_dir"/*; do
+                  [[ -f "$f" ]] || continue
+                  base="$(basename "$f")"
+                  case "$base" in cogitator-*.json) continue ;; esac
+                  cp "$f" "$agent_dir_host/$base"
+                done
               fi
 
               session_flag_already_set=0

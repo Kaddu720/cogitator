@@ -7,6 +7,7 @@ import { registerHooks, type HookHandlers } from "./hooks.js";
 import {
   type ProjectRecord,
   getProjectStatesDir,
+  VM_WORKSPACE_ROOT,
   getResolutionBase,
   resolveFrom,
   isSameOrWithin,
@@ -76,14 +77,24 @@ import {
   PROJECT_CONTEXT_GUIDANCE_PROMPT_PATH,
   TARGETED_FILE_ACCESS_PROMPT_PATH,
   COMPUTE_IN_VM_PROMPT_PATH,
+  getWorkspaceContextPath,
 } from "./resources.js";
 
 // ─── Helpers retained in workflow-mode ─────────────────────────────────────────
 
 async function getGitRoot(start: string | undefined): Promise<string | undefined> {
-  let current = resolve(getResolutionBase(start));
+  // Walk the host filesystem (accessible to the extension process) using the raw
+  // start path, then normalize the result to its VM equivalent before returning.
+  const hostRoot = process.cwd();
+  const rawStart = typeof start === "string" && start.trim().length > 0 && start.trim() !== "undefined"
+    ? start.trim() : hostRoot;
+  let current = resolve(rawStart);
   while (true) {
-    if (await fileExists(resolve(current, ".git"))) return current;
+    if (await fileExists(resolve(current, ".git"))) {
+      if (current === hostRoot) return VM_WORKSPACE_ROOT;
+      if (current.startsWith(`${hostRoot}/`)) return `${VM_WORKSPACE_ROOT}${current.slice(hostRoot.length)}`;
+      return current;
+    }
     const parent = resolve(current, "..");
     if (parent === current) return undefined;
     current = parent;
@@ -449,15 +460,15 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     const active = projects.filter((p) => !p.status || !INACTIVE.has(p.status));
 
     // INDEX.md order (active first); no repo matching in the markdown-first model.
-    const options = active.map((p) => `(${p.id}) ${p.name}${p.status ? ` · ${p.status}` : ""}`);
-    options.push(NEW_PROJECT, NO_PROJECT);
+    const options = [NEW_PROJECT, NO_PROJECT, ...active.map((p) => `(${p.id}) ${p.name}${p.status ? ` · ${p.status}` : ""}`)];
 
     if (!ctx.hasUI) { await setActiveProject(null, ctx, false); return; }
 
     const choice = await ctx.ui.select(promptTitle, options);
     if (choice === NEW_PROJECT) { await commandHandlers["new-project"]("", ctx); return; }
     if (!choice || choice === NO_PROJECT) { await setActiveProject(null, ctx); return; }
-    const index = options.indexOf(choice);
+    const FIXED_OPTIONS_COUNT = 2; // NEW_PROJECT + NO_PROJECT prepended
+    const index = options.indexOf(choice) - FIXED_OPTIONS_COUNT;
     await setActiveProject(active[index] ?? null, ctx);
   }
 
@@ -643,6 +654,8 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
 
     before_agent_start: async (event) => {
       const additions: string[] = [await readPromptFragment(CHANGE_PROPOSAL_WORKFLOW_PROMPT_PATH), await readPromptFragment(SECRET_SAFETY_PROMPT_PATH), await readPromptFragment(TARGETED_FILE_ACCESS_PROMPT_PATH), await readPromptFragment(COMPUTE_IN_VM_PROMPT_PATH)];
+      const workspaceContextPath = getWorkspaceContextPath();
+      if (workspaceContextPath && await fileExists(workspaceContextPath)) { additions.push(await readPromptFragment(workspaceContextPath)); }
       const modeDescriptor = getModeDescriptor(state.currentMode);
       additions.push(await readPromptFragment(modeDescriptor.promptPath));
       if (modeDescriptor.writePolicy.projectScopeOnly && state.activeProject) {
@@ -687,6 +700,22 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         if (event.toolName === "bash") {
           const command = String(event.input.command ?? "");
           if (/\bsops\b/i.test(command)) return { block: true, reason: "Access to the sops command is blocked." };
+        }
+
+        // External write guard: confirm before any MCP write operation (Jira, Confluence, etc.)
+        if (event.toolName.startsWith("mcp__") && ctx.hasUI) {
+          const WRITE_VERB = /__(create|update|delete|publish|transition|comment|edit|add|set|assign|attach|send|submit|upsert|patch|remove|archive|move|sync)\b/i;
+          if (WRITE_VERB.test(event.toolName)) {
+            const shortName = event.toolName.replace(/^mcp__[^_]+__/, "").replace(/_/g, " ");
+            const contextParts: string[] = [];
+            for (const key of ["issue_key", "page_id", "page_title", "space_key", "title", "summary", "parent_id", "transition", "status", "comment"]) {
+              const val = event.input[key];
+              if (typeof val === "string" && val.trim()) contextParts.push(`${key}: ${val.trim().slice(0, 80)}`);
+            }
+            const detail = contextParts.length > 0 ? `\n${contextParts.join(" · ")}` : "";
+            const choice = await ctx.ui.select(`Allow external write: ${shortName}?${detail}`, ["Yes — proceed", "No — cancel"]);
+            if (!choice || choice.startsWith("No")) return { block: true, reason: `External write cancelled by user: ${event.toolName}` };
+          }
         }
         const toolDescriptor = getModeDescriptor(state.currentMode);
         const isMutationTool = event.toolName === "write" || event.toolName === "edit";

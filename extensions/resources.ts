@@ -224,6 +224,16 @@ export const MODE_PLAN_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts
 export const MODE_CREATIVE_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/mode-creative.md", import.meta.url));
 export const PROJECT_CONTEXT_GUIDANCE_PROMPT_PATH = fileURLToPath(new URL("../resources/prompts/project-context-guidance.md", import.meta.url));
 
+/**
+ * Returns the path to a workspace-specific context prompt, or undefined if
+ * COGITATOR_WORKSPACE_CONTEXT_PATH is not set. Cogitator skips injection
+ * gracefully when this returns undefined (e.g. on a fresh tool clone).
+ */
+export function getWorkspaceContextPath(): string | undefined {
+  const p = process.env.COGITATOR_WORKSPACE_CONTEXT_PATH;
+  return p && p.trim().length > 0 ? p.trim() : undefined;
+}
+
 // ─── Mode descriptor types ──────────────────────────────────────────────────────
 
 export type ThemeColor = "accent" | "warning" | "muted" | "error" | "info";
