@@ -69,7 +69,12 @@ export function getIndexPath(): string {
 /** Canonical workspace root inside the Gondolin VM. */
 export const VM_WORKSPACE_ROOT = "/workspace";
 
-export function getResolutionBase(cwd: string | undefined, repoRoot?: string): string {
+export interface ResolutionOptions {
+  repoRoot?: string;
+  canonicalCheckoutPath?: string;
+}
+
+export function getResolutionBase(cwd: string | undefined, options?: ResolutionOptions): string {
   if (typeof cwd === "string") {
     const trimmed = cwd.trim();
     if (trimmed.length > 0 && trimmed !== "undefined") {
@@ -80,13 +85,14 @@ export function getResolutionBase(cwd: string | undefined, repoRoot?: string): s
       return trimmed;
     }
   }
-  if (repoRoot) return repoRoot;
+  if (options?.canonicalCheckoutPath) return options.canonicalCheckoutPath;
+  if (options?.repoRoot) return options.repoRoot;
   // Cogitator always runs in the Gondolin VM; /workspace is the canonical mount.
   return VM_WORKSPACE_ROOT;
 }
 
-export function resolveFrom(base: string | undefined, path: string, repoRoot?: string): string {
-  const resolutionBase = getResolutionBase(base, repoRoot);
+export function resolveFrom(base: string | undefined, path: string, options?: ResolutionOptions): string {
+  const resolutionBase = getResolutionBase(base, options);
   return isAbsolute(path) ? resolve(path) : resolve(resolutionBase, path);
 }
 
@@ -326,7 +332,7 @@ export async function buildProjectContext(
   const sections: string[] = [];
   const statePath = getProjectStatePath(project);
   const artifactsPath = getProjectArtifactsPath(project);
-  const resolvedCwd = getResolutionBase(cwd, repoRoot);
+  const resolvedCwd = getResolutionBase(cwd, { repoRoot });
 
   sections.push("[COGITATOR PROJECT ACTIVE]");
   sections.push(`Project: (${project.id}) ${project.name}`);

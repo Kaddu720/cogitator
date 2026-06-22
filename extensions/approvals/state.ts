@@ -12,7 +12,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type PendingProposal, type StoredApprovalGateState } from "./types.js";
 import { normalizePendingProposal } from "./parse.js";
-import { getResolutionBase } from "../projects.js";
+import { type ResolutionOptions, getResolutionBase } from "../projects.js";
 
 // ─── Legacy migration helpers ───────────────────────────────────────────────────
 
@@ -88,8 +88,8 @@ export function restoreApprovalGateState(ctx: ExtensionContext): StoredApprovalG
  * Convenience wrapper: restore the approval gate state and normalize the
  * pending proposals array in one call.
  */
-export function restoreNormalizedProposals(ctx: ExtensionContext, cwd: string | undefined, repoRoot?: string): PendingProposal[] {
+export function restoreNormalizedProposals(ctx: ExtensionContext, cwd: string | undefined, options?: ResolutionOptions): PendingProposal[] {
   const stored = restoreApprovalGateState(ctx);
-  const resolutionBase = getResolutionBase(cwd, repoRoot);
+  const resolutionBase = getResolutionBase(cwd, options);
   return normalizePendingProposals(stored?.pending, resolutionBase, stored?.approvedPathCounts);
 }

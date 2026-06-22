@@ -70,7 +70,13 @@ you can load it with `/project`.
 
 On session shutdown, `writeProjectShutdownCheckpoint()` in `project-state.ts`:
 1. Builds a status snapshot by parsing the state file (read-only).
-2. Writes `artifacts/<slug>/latest-shutdown.md` with timestamps, mode, proposals, and status.
+2. Writes `artifacts/<slug>/latest-shutdown.md` with timestamps, mode, proposals, status, `repo_root`, and `canonical_checkout_path`.
+
+`repo_root` is the repository root as seen inside the Gondolin VM (often under `/workspace`).
+`canonical_checkout_path` is the operator-intended checkout or worktree path for this session.
+When both are present, cogitator uses the canonical checkout path for proposal normalization,
+path resolution, and mutation gating so approvals stay attached to the intended checkout instead
+of drifting to a same-named `/workspace` mirror with a different layout.
 
 Cogitator **never writes into the state file** — no checkpoint block is injected —
 so it never conflicts with your Jira sync. On resume, the rolling shutdown artifact

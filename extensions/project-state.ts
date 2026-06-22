@@ -269,6 +269,7 @@ export interface ShutdownCheckpointInput {
   project: ProjectRecord;
   mode: Mode;
   repoRoot: string | undefined;
+  canonicalCheckoutPath?: string;
   sessionFile: string;
   proposals: PendingProposal[];
   /** Pre-computed by caller: proposals.filter(p => p.status === 'pending' && isProposalActionable(...)).length */
@@ -281,7 +282,7 @@ export interface ShutdownCheckpointInput {
  * formatting lives in project-state.ts.
  */
 export async function writeProjectShutdownCheckpoint(input: ShutdownCheckpointInput): Promise<void> {
-  const { project, mode, repoRoot, sessionFile, proposals, actionableProposalCount } = input;
+  const { project, mode, repoRoot, canonicalCheckoutPath, sessionFile, proposals, actionableProposalCount } = input;
   const timestamp = formatShutdownTimestamp();
   const artifactsPath = getProjectArtifactsPath(project);
   const artifactPath = resolve(artifactsPath, "latest-shutdown.md");
@@ -297,7 +298,7 @@ export async function writeProjectShutdownCheckpoint(input: ShutdownCheckpointIn
     "# Session Shutdown Checkpoint", "",
     `- saved_at: ${timestamp}`, `- project: (${project.id}) ${project.name}`,
     `- mode: ${mode}`, `- session_file: ${sessionFile}`, `- state_file: ${statePath}`,
-    `- repo_root: ${repoRoot ?? "[none]"}`, `- pending_proposals: ${proposals.length}`,
+    `- repo_root: ${repoRoot ?? "[none]"}`, `- canonical_checkout_path: ${canonicalCheckoutPath ?? "[none]"}`, `- pending_proposals: ${proposals.length}`,
     `- actionable_approval_steps: ${actionableProposalCount}`, `- proposal_status_counts: ${formatProposalStatusCounts(proposals)}`, "",
     "## Project Status Snapshot",
     `- executive_status: ${statusSnapshot.executiveStatus}`, `- goal: ${statusSnapshot.goal}`,

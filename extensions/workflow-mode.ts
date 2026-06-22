@@ -128,6 +128,7 @@ interface WorkflowRuntimeState {
   currentMode: Mode;
   activeProject: ProjectRecord | null;
   activeRepoRoot?: string;
+  canonicalCheckoutPath?: string;
   pendingProposals: PendingProposal[];
   approvalPromptInFlight: boolean;
   approvalPromptDeferred: boolean;
@@ -145,6 +146,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     currentMode: "plan",
     activeProject: null,
     activeRepoRoot: undefined,
+    canonicalCheckoutPath: undefined,
     pendingProposals: [],
     approvalPromptInFlight: false,
     approvalPromptDeferred: false,
@@ -168,7 +170,10 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
   // ─── Read ledger helpers ──────────────────────────────────────────────────────
 
   function getReadLedgerPath(path: string, ctx: ExtensionContext): string {
-    return resolveFrom(ctx.cwd, normalizeInputPath(path), state.activeRepoRoot);
+    return resolveFrom(ctx.cwd, normalizeInputPath(path), {
+      repoRoot: state.activeRepoRoot,
+      canonicalCheckoutPath: state.canonicalCheckoutPath,
+    });
   }
 
   function getRequestedReadWindow(input: Record<string, unknown>): { start: number; end: number; size: number } | null {
@@ -452,6 +457,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
   async function selectProject(ctx: ExtensionContext, promptTitle = "Select project for this session"): Promise<void> {
     const projects = await loadProjects();
     state.activeRepoRoot = await getGitRoot(ctx.cwd);
+    state.canonicalCheckoutPath = ctx.cwd;
 
     const NEW_PROJECT = "+ New project…";
     const NO_PROJECT = "No project";
@@ -508,6 +514,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     "project-status": async (_args, ctx) => {
       const lines = [`Mode: ${state.currentMode}`, `Project states: ${getProjectStatesDir()}`];
       if (state.activeRepoRoot) lines.push(`Repo root: ${state.activeRepoRoot}`);
+      if (state.canonicalCheckoutPath) lines.push(`Canonical checkout: ${state.canonicalCheckoutPath}`);
       if (state.activeProject) { lines.push(`Project: (${state.activeProject.id}) ${state.activeProject.name}${state.activeProject.status ? ` · ${state.activeProject.status}` : ""}`); lines.push(`State: ${getProjectStatePath(state.activeProject)}`); lines.push(`Artifacts: ${getProjectArtifactsPath(state.activeProject)}`); }
       else { lines.push("Project: none"); }
       const needingApproval = getPendingApprovalProposals(approvalDeps);
@@ -583,9 +590,13 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     session_start: async (_event, ctx) => {
       baseTools = Array.from(new Set(pi.getAllTools().map((t) => t.name)));
       state.activeRepoRoot = await getGitRoot(ctx.cwd);
+      state.canonicalCheckoutPath = ctx.cwd;
       const restoredMode = restoreMode(ctx);
       state.currentMode = getRestoredStartupMode(restoredMode);
-      state.pendingProposals = restoreNormalizedProposals(ctx, ctx.cwd, state.activeRepoRoot);
+      state.pendingProposals = restoreNormalizedProposals(ctx, ctx.cwd, {
+        repoRoot: state.activeRepoRoot,
+        canonicalCheckoutPath: state.canonicalCheckoutPath,
+      });
       const preferredProjectId = restoreStoredProjectId(ctx) ?? process.env.COGITATOR_PROJECT_ID;
       if (typeof preferredProjectId === "string") {
         const projects = await loadProjects();
@@ -600,9 +611,13 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     session_tree: async (_event, ctx) => {
       baseTools = Array.from(new Set(pi.getAllTools().map((t) => t.name)));
       state.activeRepoRoot = await getGitRoot(ctx.cwd);
+      state.canonicalCheckoutPath = ctx.cwd;
       const restoredMode = restoreMode(ctx);
       state.currentMode = getRestoredTreeMode(restoredMode);
-      state.pendingProposals = restoreNormalizedProposals(ctx, ctx.cwd, state.activeRepoRoot);
+      state.pendingProposals = restoreNormalizedProposals(ctx, ctx.cwd, {
+        repoRoot: state.activeRepoRoot,
+        canonicalCheckoutPath: state.canonicalCheckoutPath,
+      });
       const restoredProjectId = restoreStoredProjectId(ctx);
       if (restoredProjectId === null) { state.activeProject = null; }
       else if (typeof restoredProjectId === "string") { const projects = await loadProjects(); state.activeProject = projects.find((p) => p.id === restoredProjectId) ?? null; }
@@ -617,6 +632,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
           project: state.activeProject,
           mode: state.currentMode,
           repoRoot: state.activeRepoRoot,
+          canonicalCheckoutPath: state.canonicalCheckoutPath,
           sessionFile: ctx.sessionManager.getSessionFile() ?? "ephemeral",
           proposals: ps(),
           actionableProposalCount: getPendingApprovalProposals(approvalDeps).length,
@@ -663,7 +679,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       }
       if (!state.activeProject) { if (additions.length === 0) return; return { systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}` }; }
       additions.push(await readPromptFragment(PROJECT_CONTEXT_GUIDANCE_PROMPT_PATH));
-      const message = { customType: "cogitator-project-context", content: await buildProjectContext(state.activeProject, event.cwd, state.activeRepoRoot, state.currentMode), display: false };
+      const message = { customType: "cogitator-project-context", content: await buildProjectContext(state.activeProject, event.cwd, state.canonicalCheckoutPath ?? state.activeRepoRoot, state.currentMode), display: false };
       if (additions.length === 0) return { message };
       return { message, systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}` };
     },
@@ -674,7 +690,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         const markResult = markCompletedProposals(ps(), assistantText);
         const completedCount = markResult.count;
         if (completedCount > 0) { state.pendingProposals = markResult.proposals; }
-        const proposals = extractPendingProposals(assistantText, ctx.cwd, state.activeRepoRoot);
+        const proposals = extractPendingProposals(assistantText, ctx.cwd, state.canonicalCheckoutPath ?? state.activeRepoRoot);
         let stateChanged = completedCount > 0;
         if (completedCount > 0 && ctx.hasUI) ctx.ui.notify(`Marked ${completedCount} approved or applying proposal(s) complete.`, "success");
         if (proposals.length > 0) {
@@ -720,7 +736,10 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         const toolDescriptor = getModeDescriptor(state.currentMode);
         const isMutationTool = event.toolName === "write" || event.toolName === "edit";
         const requestedPath = typeof event.input.path === "string" ? event.input.path : "";
-        const resolvedPath = requestedPath ? resolveFrom(ctx.cwd, normalizeInputPath(requestedPath), state.activeRepoRoot) : "";
+        const resolvedPath = requestedPath ? resolveFrom(ctx.cwd, normalizeInputPath(requestedPath), {
+          repoRoot: state.activeRepoRoot,
+          canonicalCheckoutPath: state.canonicalCheckoutPath,
+        }) : "";
 
         // blocked modes: block ALL bash and ALL mutations (readonly)
         if (toolDescriptor.writePolicy.blocked) {
@@ -775,9 +794,9 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         }
 
         if ((event.toolName === "grep" || event.toolName === "find")) {
-          const broadSearch = isBroadSearchPath(event.input.path, ctx.cwd, state.activeRepoRoot);
+          const broadSearch = isBroadSearchPath(event.input.path, ctx.cwd, state.canonicalCheckoutPath ?? state.activeRepoRoot);
           const requestedLimit = getRequestedSearchLimit(event.input);
-          if (requiresSearchGlob(event.input, ctx.cwd, state.activeRepoRoot, state.currentMode, event.toolName === "find" ? "find" : "grep")) {
+          if (requiresSearchGlob(event.input, ctx.cwd, state.canonicalCheckoutPath ?? state.activeRepoRoot, state.currentMode, event.toolName === "find" ? "find" : "grep")) {
             return {
               block: true,
               reason: "Broad repo-wide search requires a glob. Add a glob such as extensions/**/*.ts or resources/**/*.md to narrow the search before reading files.",
@@ -820,7 +839,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
           if (isMutationTool) {
             if (!isApprovalExemptPath(resolvedPath, state.activeProject)) {
               const approvedProposal = beginApplyingProposalForPath(approvalDeps, resolvedPath, ctx);
-              if (!approvedProposal) return { block: true, reason: buildApprovalBlockedReason(resolvedPath, ps(), getResolutionBase(ctx.cwd, state.activeRepoRoot), { toolName: event.toolName, mutationSummary: describeMutation(event as { toolName: string; input: Record<string, unknown> }) }) };
+              if (!approvedProposal) return { block: true, reason: buildApprovalBlockedReason(resolvedPath, ps(), getResolutionBase(ctx.cwd, { repoRoot: state.activeRepoRoot, canonicalCheckoutPath: state.canonicalCheckoutPath }), { toolName: event.toolName, mutationSummary: describeMutation(event as { toolName: string; input: Record<string, unknown> }) }) };
             }
           }
           return;
@@ -837,7 +856,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
           if (!allowed) return { block: true, reason: ["Plan mode only allows file mutations for the active project control files.", `Active project state file: ${statePath}`, `Active project artifacts directory: ${artifactsPath}`, `Allowed Jira draft path pattern: ${JIRA_TMP_PREFIX}<ISSUE-KEY>.txt`, `Requested path: ${resolvedPath}`, "Use /normal to edit repository files."].join("\n") };
           if (!isApprovalExemptPath(resolvedPath, state.activeProject)) {
             const approvedProposal = beginApplyingProposalForPath(approvalDeps, resolvedPath, ctx);
-            if (!approvedProposal) return { block: true, reason: buildApprovalBlockedReason(resolvedPath, ps(), getResolutionBase(ctx.cwd, state.activeRepoRoot), { toolName: event.toolName, mutationSummary: describeMutation(event as { toolName: string; input: Record<string, unknown> }) }) };
+            if (!approvedProposal) return { block: true, reason: buildApprovalBlockedReason(resolvedPath, ps(), getResolutionBase(ctx.cwd, { repoRoot: state.activeRepoRoot, canonicalCheckoutPath: state.canonicalCheckoutPath }), { toolName: event.toolName, mutationSummary: describeMutation(event as { toolName: string; input: Record<string, unknown> }) }) };
           }
         }
       } catch (error) {
