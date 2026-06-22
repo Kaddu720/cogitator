@@ -24,11 +24,13 @@ export interface PendingProposal {
   id: string;
   index: number;
   total: number;
-  /** Display path used in UI — may be relative or wrapped. */
+  /** Display-only path text shown in UI. */
+  displayFile: string;
+  /** Legacy alias preserved for compatibility with older renderers/selectors. */
   file: string;
   /** Raw path string as it appeared in the proposal block. */
   rawFile: string;
-  /** Path after stripping quotes, backticks, and punctuation. */
+  /** Path after stripping quotes, backticks, markdown wrapping, and punctuation. */
   normalizedFile: string;
   proposedEdit: string;
   /** Absolute resolved path used for gating comparisons. */

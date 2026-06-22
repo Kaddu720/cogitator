@@ -26,7 +26,7 @@ export function isProposalStatus(value: unknown): value is ProposalStatus {
  * Example: `Change 2/3 · extensions/workflow-mode.ts — Add import from ./projects.js`
  */
 export function formatProposalSummary(proposal: PendingProposal): string {
-  return `Change ${proposal.index}/${proposal.total} · ${proposal.file} — ${proposal.proposedEdit}`;
+  return `Change ${proposal.index}/${proposal.total} · ${proposal.displayFile} — ${proposal.proposedEdit}`;
 }
 
 /**

@@ -78,15 +78,24 @@ export function findAuthorizedProposalForPath(deps: ApprovalActionDeps, resolved
 
 // ─── Selector helpers ───────────────────────────────────────────────────────────
 
-/** Return all selectors that can identify a proposal: id, index, "N/total", file paths. */
+/** Return all selectors that can identify a proposal, ordered by authority. */
 export function getProposalSelectors(proposal: PendingProposal): string[] {
-  return [proposal.id, String(proposal.index), `${proposal.index}/${proposal.total}`, proposal.file, proposal.rawFile, proposal.normalizedFile, proposal.resolvedPath];
+  return [
+    proposal.id,
+    proposal.resolvedPath,
+    proposal.normalizedFile,
+    String(proposal.index),
+    `${proposal.index}/${proposal.total}`,
+    proposal.displayFile,
+    proposal.file,
+    proposal.rawFile,
+  ];
 }
 
 export function findProposalBySelector(deps: ApprovalActionDeps, selector: string, allowedStatuses: ProposalStatus[] = ["pending"]): PendingProposal | undefined {
   const normalizedSelector = normalizeInputPath(selector).toLowerCase();
   if (!normalizedSelector) return undefined;
-  return deps.proposals().find((p) => allowedStatuses.includes(p.status) && getProposalSelectors(p).some((c) => normalizeInputPath(c).toLowerCase() === normalizedSelector));
+  return deps.proposals().find((p) => allowedStatuses.includes(p.status) && getProposalSelectors(p).some((candidate) => normalizeInputPath(candidate).toLowerCase() === normalizedSelector));
 }
 
 /** Split a comma-separated selector list into individual selector strings. */

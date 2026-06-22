@@ -186,9 +186,42 @@ Proposed edit: Update loader-friendly summary guidance
 `;
   const proposals = extractPendingProposals(text, "/tmp");
   assert.strictEqual(proposals.length, 1);
+  assert.strictEqual(proposals[0].displayFile, "[skills/project-state-management.md](/workspace/skills/project-state-management.md)");
   assert.strictEqual(proposals[0].rawFile, "[skills/project-state-management.md](/workspace/skills/project-state-management.md)");
   assert.strictEqual(proposals[0].normalizedFile, "/workspace/skills/project-state-management.md");
   assert.strictEqual(proposals[0].resolvedPath, "/workspace/skills/project-state-management.md");
+});
+
+test("extractPendingProposals: deduplicates identical proposal blocks in one response", () => {
+  const text = `
+Change 2/2
+File: cogitator/extensions/approvals/actions.ts
+Proposed edit: Prefer canonical selectors
+
+Change 2/2
+File: cogitator/extensions/approvals/actions.ts
+Proposed edit: Prefer canonical selectors
+`;
+  const proposals = extractPendingProposals(text, "/workspace");
+  assert.strictEqual(proposals.length, 1);
+  assert.strictEqual(proposals[0].displayFile, "cogitator/extensions/approvals/actions.ts");
+  assert.strictEqual(proposals[0].normalizedFile, "cogitator/extensions/approvals/actions.ts");
+});
+
+test("extractPendingProposals: keeps completion marker separate from next proposal", () => {
+  const text = `
+Change 1/2 is complete.
+
+Change 2/2
+File: cogitator/extensions/approvals/actions.ts
+Proposed edit: Prefer canonical selectors
+`;
+  const proposals = extractPendingProposals(text, "/workspace");
+  const completed = extractCompletedChanges(text);
+  assert.strictEqual(proposals.length, 1);
+  assert.strictEqual(proposals[0].index, 2);
+  assert.strictEqual(completed.length, 1);
+  assert.deepStrictEqual(completed[0], { index: 1, total: 2 });
 });
 
 test("extractCompletedChanges: finds completion markers", () => {

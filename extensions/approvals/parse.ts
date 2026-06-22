@@ -86,6 +86,10 @@ export function isSameProposalContent(a: PendingProposal, b: PendingProposal): b
   );
 }
 
+export function getProposalFingerprint(proposal: PendingProposal): string {
+  return `${proposal.index}/${proposal.total}|${proposal.resolvedPath}|${proposal.proposedEdit}`;
+}
+
 export function getProposalMergeReuseRank(proposal: PendingProposal): number {
   switch (proposal.status) {
     case "applying": return 0;
@@ -168,6 +172,12 @@ export function normalizePendingProposal(value: unknown, resolutionBase: string)
   const resolvedPath =
     typeof maybe.resolvedPath === "string" && maybe.resolvedPath.trim().length > 0
       ? resolve(maybe.resolvedPath) : resolveFrom(proposalBase, normalizedFile);
+  const displayFile =
+    typeof maybe.displayFile === "string" && maybe.displayFile.trim().length > 0
+      ? maybe.displayFile.trim()
+      : typeof maybe.file === "string" && maybe.file.trim().length > 0
+        ? maybe.file.trim()
+        : rawFile;
   const file =
     typeof maybe.file === "string" && maybe.file.trim().length > 0
       ? normalizeInputPath(maybe.file) || normalizedFile : normalizedFile;
@@ -179,7 +189,7 @@ export function normalizePendingProposal(value: unknown, resolutionBase: string)
     typeof maybe[k] === "string" && (maybe[k] as string).trim().length > 0 ? (maybe[k] as string).trim() : undefined;
 
   return {
-    id, index, total, file, rawFile, normalizedFile, proposedEdit, resolvedPath,
+    id, index, total, displayFile, file, rawFile, normalizedFile, proposedEdit, resolvedPath,
     resolutionBase: proposalBase, status,
     sequenceKey: sq("sequenceKey"), revisionNote: sq("revisionNote"), deferredNote: sq("deferredNote"),
     approvedAt: sq("approvedAt"), applyingAt: sq("applyingAt"), appliedAt: sq("appliedAt"), deferredAt: sq("deferredAt"),
@@ -194,6 +204,7 @@ export function normalizePendingProposal(value: unknown, resolutionBase: string)
  */
 export function extractPendingProposals(text: string, cwd: string | undefined, repoRoot?: string): PendingProposal[] {
   const proposals: PendingProposal[] = [];
+  const seenFingerprints = new Set<string>();
   const resolutionBase = getResolutionBase(cwd, repoRoot);
   const pattern = /(?:^|\n)[ \t]*Change\s+(\d+)\/(\d+)\s*\n[ \t]*File:\s*(.+)\n[ \t]*Proposed edit:\s*(.+)(?=\n|$)/gm;
 
@@ -203,10 +214,14 @@ export function extractPendingProposals(text: string, cwd: string | undefined, r
     const rawFile = match[3].trim();
     const proposedEdit = match[4].trim();
     const proposal = normalizePendingProposal(
-      { index, total, file: rawFile, rawFile, proposedEdit, resolutionBase },
+      { index, total, displayFile: rawFile, file: rawFile, rawFile, proposedEdit, resolutionBase },
       resolutionBase,
     );
-    if (proposal) proposals.push(proposal);
+    if (!proposal) continue;
+    const fingerprint = getProposalFingerprint(proposal);
+    if (seenFingerprints.has(fingerprint)) continue;
+    seenFingerprints.add(fingerprint);
+    proposals.push(proposal);
   }
 
   const groupedByTotal = new Map<number, PendingProposal[]>();
