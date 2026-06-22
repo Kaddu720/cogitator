@@ -246,6 +246,17 @@ You can call the factory from your main flake with:
 - `providerConfigs` for provider URLs and secret file paths
 - `secretEnvFiles` for additional protected files you want staged into the per-run agent dir under `secrets/`
 
+### Azure / APIM provider configuration
+
+**Do not use `"azure"` as the provider ID.** Pi has built-in Azure OpenAI handling that activates when the provider is named `"azure"` — it rewrites the request URL to include the deployment name in the path (`/deployments/{model}/responses`), which breaks APIM-fronted endpoints that expect the model in the request body. Use any other ID (e.g. `"varda-ai"`) to get standard OpenAI-compatible behaviour where pi posts to `{baseUrl}/responses` with the model in the body.
+
+`providerConfigs` handles API key staging into the per-run agent dir. Also set these in `plainEnv`:
+
+| Variable | Purpose |
+|---|---|
+| `COGITATOR_DEFAULT_PROVIDER` | Provider ID to select at startup |
+| `COGITATOR_DEFAULT_MODEL` | Model/deployment name to pre-select |
+
 Conceptual example from a Home Manager / `sops-nix` environment:
 
 ```nix
@@ -256,20 +267,21 @@ Conceptual example from a Home Manager / `sops-nix` environment:
     cog = pkgs.cogitatorLib.mkCogitator {
       controlRoot = "/home/kaddu/.local/share/cogitator";
       providerConfigs = {
-        azure = {
-          name = "Azure OpenAI";
-          baseUrl = "https://sre-dev.azure-api.net/varda-ai-nextgen-resource/openai/v1";
+        varda-ai = {                  # NOT "azure" — avoids pi's Azure URL rewriting
+          baseUrl = "https://<apim-host>/openai/v1";
           api = "openai-responses";
-          authHeader = true;
+          auth = {
+            type = "header";
+            header = "api-key";
+          };
           apiKeyFile = config.sops.secrets.azure_api_key.path;
+          # models must be a list of objects — plain strings fail schema validation
+          models = [ { id = "gpt-5.4"; } { id = "gpt-5.4-kaddu"; } ];
         };
-        openwebui = {
-          name = "OpenWebUI";
-          baseUrl = "https://dev-ai.cl4-ops-dev.varda.com/api/v1";
-          api = "openai-responses";
-          authHeader = true;
-          apiKeyFile = config.sops.secrets.openwebui_api_key.path;
-        };
+      };
+      plainEnv = {
+        COGITATOR_DEFAULT_PROVIDER = "varda-ai";
+        COGITATOR_DEFAULT_MODEL = "your-deployment-name";
       };
     };
   in [
