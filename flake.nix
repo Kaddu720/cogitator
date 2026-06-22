@@ -407,10 +407,10 @@ EOF
                 yt-dlp
                 nodejs_24
                 python3
-                qemu
               ])
               ++ lib.optionals isLinux (with pkgs; [
                 xdg-utils
+                qemu
               ])
               ++ extraRuntimeTools;
 

@@ -18,7 +18,7 @@ Detailed reference docs live in `docs/`:
 
 - `cogi`, a host launcher that runs `pi` with the Gondolin micro-VM extension registered for process isolation
 - `pi` built from `@earendil-works/pi-coding-agent` (the upstream pi), run on `nodejs_24` (Gondolin requires Node ≥ 23.6)
-- `qemu` and the other flake-provided runtime tools (`git`, `gh`, `ffmpeg`, `yt-dlp`, `node`, `python`)
+- `qemu` and the other flake-provided runtime tools (`git`, `gh`, `ffmpeg`, `yt-dlp`, `node`, `python`) — on Linux, `qemu` is included in the runtime path; on macOS, install it separately via `brew install qemu`
 - bundled pi packages registered in the agent `settings.json`: `pi-web-access`, the `pi-mcp-adapter` (MCP bridge), the `ponytail` skill, and a cogitator `new-project` skill
 - an overlay exposing:
   - `pkgs.cogitator`
@@ -45,7 +45,7 @@ Process isolation is provided by **Gondolin**, a local QEMU micro-VM, wired in a
 - `cogi` runs `pi` directly on the host — there is no `bubblewrap` or Seatbelt wrapper.
 - The Gondolin extension overrides `pi`'s `read`/`write`/`edit`/`bash` tools (and `!` commands) so they execute inside the micro-VM, with the workspace mounted read-write at `/workspace`.
 - It boots on `session_start`; guest images (~200 MB) are fetched and cached on first use, so the first run needs network and may be slow.
-- Works on Linux and macOS via the QEMU backend (`qemu` is on the runtime path). On Linux, KVM acceleration is used when available.
+- Works on Linux and macOS via the QEMU backend. On Linux, `qemu` is included in the flake runtime path and KVM acceleration is used when available. On macOS, `qemu` must be installed separately via `brew install qemu` — nixpkgs QEMU is compiled on the build farm against an older macOS SDK and fails HVF assertions on newer macOS releases.
 - Gondolin updates independently via `nix flake update gondolin` (it is pinned to a release tag; bump the tag and the package hashes to upgrade).
 
 ## Project model (markdown-first)
@@ -342,14 +342,6 @@ Shared resources under `resources/` hold reusable templates and prompt fragments
 `extensions/workflow-mode.ts` loads prompt guidance for the approval workflow, secret
 handling, modes, project-context review, and targeted file access from
 `resources/prompts/` at runtime.
-
-## Potential future changes
-
-### Switch QEMU source from nixpkgs to Homebrew
-
-Currently `qemu` is included in `runtimeTools` (flake.nix line 411) and prepended to PATH, so cogitator uses the nixpkgs-provided QEMU binary. That binary is compiled on the nixpkgs build farm against an older macOS SDK, which can cause HVF assertion failures on newer macOS versions — specifically `HV_SYS_REG_SMCR_EL1` mismatches when the Hypervisor.framework API changes (observed on macOS 26 Tahoe with QEMU 10.2.2 from April 2026 nixpkgs).
-
-The durable fix is to remove `qemu` from `runtimeTools` and install it via Homebrew instead (`brew install qemu`). Homebrew compiles bottles natively against the current macOS SDK, so it tracks macOS releases without any flake changes needed. After removing `qemu` from `runtimeTools`, the Homebrew-installed `qemu-system-aarch64` will be found on PATH as expected by gondolin.
 
 ## Testing
 
