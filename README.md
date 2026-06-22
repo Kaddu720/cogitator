@@ -343,6 +343,14 @@ Shared resources under `resources/` hold reusable templates and prompt fragments
 handling, modes, project-context review, and targeted file access from
 `resources/prompts/` at runtime.
 
+## Potential future changes
+
+### Switch QEMU source from nixpkgs to Homebrew
+
+Currently `qemu` is included in `runtimeTools` (flake.nix line 411) and prepended to PATH, so cogitator uses the nixpkgs-provided QEMU binary. That binary is compiled on the nixpkgs build farm against an older macOS SDK, which can cause HVF assertion failures on newer macOS versions — specifically `HV_SYS_REG_SMCR_EL1` mismatches when the Hypervisor.framework API changes (observed on macOS 26 Tahoe with QEMU 10.2.2 from April 2026 nixpkgs).
+
+The durable fix is to remove `qemu` from `runtimeTools` and install it via Homebrew instead (`brew install qemu`). Homebrew compiles bottles natively against the current macOS SDK, so it tracks macOS releases without any flake changes needed. After removing `qemu` from `runtimeTools`, the Homebrew-installed `qemu-system-aarch64` will be found on PATH as expected by gondolin.
+
 ## Testing
 
 The flake provides the pi packages the extensions import, so the unit tests run without a manual `npm install`. From the repo root:
