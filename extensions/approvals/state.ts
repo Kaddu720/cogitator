@@ -48,7 +48,7 @@ export function normalizePendingProposals(
 
   return pending
     .map((p) => normalizePendingProposal(p, resolutionBase))
-    .filter((p): p is PendingProposal => p !== undefined)
+    .filter((p): p is PendingProposal => p !== undefined && p.normalizedFile.length > 0 && p.resolvedPath.length > 0)
     .map((p) => {
       if (p.status !== "pending") return p;
       const remaining = approvedCounts.get(p.resolvedPath) ?? 0;

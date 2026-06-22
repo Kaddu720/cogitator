@@ -109,6 +109,18 @@ test("normalizeInputPath: collapses double slashes", () => {
   assert.strictEqual(normalizeInputPath("foo//bar///baz.ts"), "foo/bar/baz.ts");
 });
 
+test("normalizeInputPath: extracts markdown link target", () => {
+  assert.strictEqual(normalizeInputPath("[README.md](README.md)"), "README.md");
+  assert.strictEqual(
+    normalizeInputPath("[skills/project-state-management.md](/workspace/skills/project-state-management.md)"),
+    "/workspace/skills/project-state-management.md",
+  );
+});
+
+test("normalizeInputPath: rejects leftover markdown syntax after normalization", () => {
+  assert.strictEqual(normalizeInputPath("[README.md](README.md"), "");
+});
+
 test("normalizeInputPath: strips trailing slash", () => {
   assert.strictEqual(normalizeInputPath("foo/bar/"), "foo/bar");
 });
@@ -164,6 +176,19 @@ Proposed edit: Edit B
   assert.strictEqual(proposals.length, 2);
   assert.strictEqual(proposals[0].index, 1);
   assert.strictEqual(proposals[1].index, 2);
+});
+
+test("extractPendingProposals: extracts markdown-linked file targets", () => {
+  const text = `
+Change 1/1
+File: [skills/project-state-management.md](/workspace/skills/project-state-management.md)
+Proposed edit: Update loader-friendly summary guidance
+`;
+  const proposals = extractPendingProposals(text, "/tmp");
+  assert.strictEqual(proposals.length, 1);
+  assert.strictEqual(proposals[0].rawFile, "[skills/project-state-management.md](/workspace/skills/project-state-management.md)");
+  assert.strictEqual(proposals[0].normalizedFile, "/workspace/skills/project-state-management.md");
+  assert.strictEqual(proposals[0].resolvedPath, "/workspace/skills/project-state-management.md");
 });
 
 test("extractCompletedChanges: finds completion markers", () => {

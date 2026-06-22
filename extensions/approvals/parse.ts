@@ -19,11 +19,17 @@ import { getResolutionBase, resolveFrom } from "../projects.js";
  * Strip balanced wrapping tokens (backticks, quotes, brackets) from a path
  * string as it might appear in an assistant proposal block.
  */
+function extractMarkdownLinkTarget(path: string): string {
+  const trimmed = path.trim();
+  const markdownLink = trimmed.match(/^\[[^\]]*\]\((.+)\)$/);
+  return markdownLink?.[1]?.trim() || trimmed;
+}
+
 function unwrapPathToken(path: string): string {
   const pairs: Array<readonly [string, string]> = [
     ["`", "`"], ['"', '"'], ["'", "'"], ["<", ">"], ["(", ")"], ["[", "]"],
   ];
-  let value = path.trim();
+  let value = extractMarkdownLinkTarget(path);
   let changed = true;
   while (changed && value.length >= 2) {
     changed = false;
@@ -51,6 +57,9 @@ export function normalizeInputPath(path: string): string {
   if (normalized.length === 0) return normalized;
   normalized = normalized.replace(/\/{2,}/g, "/");
   if (normalized.length > 1) normalized = normalized.replace(/\/+$/, "");
+  if (normalized.includes("](") || (normalized.includes("[") && normalized.includes("]"))) {
+    return "";
+  }
   return normalized;
 }
 
