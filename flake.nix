@@ -1078,6 +1078,8 @@ PY
             };
           };
 
+        homeManagerModules.default = import ./modules/home-manager.nix;
+
         packages = {
           default = defaultCogitator.piSandbox;
           cogi = defaultCogitator.piSandbox;
