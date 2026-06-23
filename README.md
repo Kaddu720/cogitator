@@ -257,6 +257,8 @@ You can call the factory from your main flake with:
 | `COGITATOR_DEFAULT_PROVIDER` | Provider ID to select at startup |
 | `COGITATOR_DEFAULT_MODEL` | Model/deployment name to pre-select |
 
+Primary/alternate models for `/plan` and `/normal` can be configured declaratively through the `modeModels` argument to `mkCogitator`.
+
 Conceptual example from a Home Manager / `sops-nix` environment:
 
 ```nix
@@ -279,9 +281,31 @@ Conceptual example from a Home Manager / `sops-nix` environment:
           models = [ { id = "gpt-5.4"; } { id = "gpt-5.4-kaddu"; } ];
         };
       };
+      modeModels = {
+        plan = {
+          primary = {
+            provider = "anthropic";
+            modelId = "claude-opus-4.8";
+          };
+          alternate = {
+            provider = "varda-ai";
+            modelId = "gpt-5.4-kaddu";
+          };
+        };
+        normal = {
+          primary = {
+            provider = "varda-ai";
+            modelId = "gpt-5.4-kaddu";
+          };
+          alternate = {
+            provider = "anthropic";
+            modelId = "claude-sonnet-4-6";
+          };
+        };
+      };
       plainEnv = {
         COGITATOR_DEFAULT_PROVIDER = "varda-ai";
-        COGITATOR_DEFAULT_MODEL = "your-deployment-name";
+        COGITATOR_DEFAULT_MODEL = "gpt-5.4-kaddu";
       };
     };
   in [
@@ -290,6 +314,8 @@ Conceptual example from a Home Manager / `sops-nix` environment:
   ];
 }
 ```
+
+Internally, `modeModels` is translated into `COGITATOR_*` environment variables for the runtime extension. Those variables remain supported as a fallback/compatibility path.
 
 If you just want the default package without host-specific provider wiring, you can use:
 

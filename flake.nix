@@ -295,6 +295,42 @@ EOF
             '') attrs
           );
 
+        mkModeModelEnv = modeModels:
+          let
+            modeEnvMap = {
+              plan = {
+                primaryProvider = "COGITATOR_PLAN_PRIMARY_PROVIDER";
+                primaryModel = "COGITATOR_PLAN_PRIMARY_MODEL";
+                alternateProvider = "COGITATOR_PLAN_ALT_PROVIDER";
+                alternateModel = "COGITATOR_PLAN_ALT_MODEL";
+              };
+              normal = {
+                primaryProvider = "COGITATOR_NORMAL_PRIMARY_PROVIDER";
+                primaryModel = "COGITATOR_NORMAL_PRIMARY_MODEL";
+                alternateProvider = "COGITATOR_NORMAL_ALT_PROVIDER";
+                alternateModel = "COGITATOR_NORMAL_ALT_MODEL";
+              };
+            };
+            convertMode = modeName: cfg:
+              let
+                names = modeEnvMap.${modeName} or (throw "modeModels.${modeName} is not supported; expected one of: ${lib.concatStringsSep ", " (builtins.attrNames modeEnvMap)}");
+                requireString = fieldName: value:
+                  if builtins.isString value && value != ""
+                  then value
+                  else throw "modeModels.${modeName}.${fieldName} must be a non-empty string";
+                primary = cfg.primary or (throw "modeModels.${modeName}.primary is required");
+                alternate = cfg.alternate or (throw "modeModels.${modeName}.alternate is required");
+              in {
+                ${names.primaryProvider} = requireString "primary.provider" (primary.provider or null);
+                ${names.primaryModel} = requireString "primary.modelId" (primary.modelId or null);
+                ${names.alternateProvider} = requireString "alternate.provider" (alternate.provider or null);
+                ${names.alternateModel} = requireString "alternate.modelId" (alternate.modelId or null);
+              };
+          in
+            lib.foldl' lib.recursiveUpdate { } (
+              lib.mapAttrsToList convertMode modeModels
+            );
+
         mkSecretBindings = secretFiles:
           lib.mapAttrsToList (name: path: {
             source = toString path;
@@ -373,12 +409,14 @@ EOF
           plainEnv ? {},
           secretEnvFiles ? {},
           providerConfigs ? {},
+          modeModels ? {},
           extraExtensions ? [],
           extraRuntimeTools ? [],
           defaultProjectId ? null,
         }:
           let
-            checkedPlainEnv = validateEnvMap "plainEnv" plainEnv;
+            checkedModeModelEnv = validateEnvMap "modeModels" (mkModeModelEnv modeModels);
+            checkedPlainEnv = validateEnvMap "plainEnv" (plainEnv // checkedModeModelEnv);
             checkedSecretEnvFiles = validateEnvMap "secretEnvFiles" secretEnvFiles;
             piModelsConfig = mkPiModelsConfig providerConfigs;
             providerSecretFiles = mkProviderSecretFiles providerConfigs;
@@ -795,6 +833,9 @@ ${builtins.toJSON ({
                 packages = [
                   "${piBasePkg}/share/pi-web-access"
                   "${piBasePkg}/share/pi-mcp-adapter"
+                  # ponytail is installed as an on-demand skill package; keep the
+                  # shared baseline prompt lean and use the skill when a task
+                  # explicitly calls for simplification/review mode.
                   "${ponytailPkg}/share/ponytail"
                   "${cogitatorSkillsPkg}/share/cogitator-skills"
                   "${gondolinExtPkg}/share/pi-extension-gondolin"

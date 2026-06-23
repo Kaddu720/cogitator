@@ -280,14 +280,23 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     alternate: ModeModelTarget;
   }
 
+  function getEnvModeModelTarget(prefix: string, fallback: ModeModelTarget): ModeModelTarget {
+    const provider = process.env[`COGITATOR_${prefix}_PROVIDER`]?.trim();
+    const modelId = process.env[`COGITATOR_${prefix}_MODEL`]?.trim();
+    if (provider && modelId) {
+      return { provider, modelId };
+    }
+    return fallback;
+  }
+
   const MODE_MODEL_PAIRS: Partial<Record<Mode, ModeModelPair>> = {
     plan: {
-      primary: { provider: "anthropic", modelId: "claude-opus-4-6" },
-      alternate: { provider: "azure", modelId: "gpt-5.4-kaddu" },
+      primary: getEnvModeModelTarget("PLAN_PRIMARY", { provider: "anthropic", modelId: "claude-opus-4.8" }),
+      alternate: getEnvModeModelTarget("PLAN_ALT", { provider: "varda-ai", modelId: "gpt-5.4-kaddu" }),
     },
     normal: {
-      primary: { provider: "azure", modelId: "gpt-5.4-kaddu" },
-      alternate: { provider: "anthropic", modelId: "claude-sonnet-4-5" },
+      primary: getEnvModeModelTarget("NORMAL_PRIMARY", { provider: "varda-ai", modelId: "gpt-5.4-kaddu" }),
+      alternate: getEnvModeModelTarget("NORMAL_ALT", { provider: "anthropic", modelId: "claude-sonnet-4-6" }),
     },
   };
 
