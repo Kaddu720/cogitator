@@ -30,7 +30,10 @@
   };
 
   outputs = inputs@{ self, nixpkgs, flake-utils, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
+    {
+      homeManagerModules.default = import ./modules/home-manager.nix;
+    }
+    // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
@@ -1077,8 +1080,6 @@ PY
               mkCogitator = self.lib.${final.system}.mkCogitator;
             };
           };
-
-        homeManagerModules.default = import ./modules/home-manager.nix;
 
         packages = {
           default = defaultCogitator.piSandbox;
