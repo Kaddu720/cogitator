@@ -816,11 +816,12 @@ PY
               mkdir -p "$agent_secrets_dir"
               trap '
                 if [[ -n "$host_pi_agent_dir" ]]; then
-                  for f in "$agent_dir_host"/*; do
-                    [[ -f "$f" ]] || continue
-                    base="$(basename "$f")"
+                  for path in "$agent_dir_host"/*; do
+                    [[ -e "$path" ]] || continue
+                    base="$(basename "$path")"
                     case "$base" in cogitator-*.json|secrets) continue ;; esac
-                    cp "$f" "$host_pi_agent_dir/$base"
+                    rm -rf "$host_pi_agent_dir/$base"
+                    cp -R "$path" "$host_pi_agent_dir/$base"
                   done
                 fi
                 rm -rf "$agent_dir_host"
@@ -948,11 +949,11 @@ with open(sys.argv[3], "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
               if [[ -n "$host_pi_agent_dir" ]]; then
-                for f in "$host_pi_agent_dir"/*; do
-                  [[ -f "$f" ]] || continue
-                  base="$(basename "$f")"
+                for path in "$host_pi_agent_dir"/*; do
+                  [[ -e "$path" ]] || continue
+                  base="$(basename "$path")"
                   case "$base" in cogitator-*.json) continue ;; esac
-                  cp "$f" "$agent_dir_host/$base"
+                  cp -R "$path" "$agent_dir_host/$base"
                 done
               fi
 

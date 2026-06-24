@@ -117,10 +117,11 @@ no `/add-repo` — the markdown-first model has no structured repo links.)
 - allows `write`/`edit` only for the active project's:
   - state file (`<slug>.md`)
   - `artifacts/<slug>/**`
+- supports planning artifacts in that project artifact directory, such as daily plans or session plans under `~/Projects/projectStates/artifacts/<slug>/`
 - also allows Jira closeout drafts under:
   - `/tmp/jira-closeout-<ISSUE-KEY>.txt`
 
-This lets you keep project tracking and artifacts up to date during planning without permitting repo/code edits.
+This lets you keep project tracking and planning artifacts up to date during planning without permitting repo/code edits.
 
 ## Transactional approval gate
 
@@ -245,6 +246,22 @@ You can call the factory from your main flake with:
 - `plainEnv` for non-secret values
 - `providerConfigs` for provider URLs and secret file paths
 - `secretEnvFiles` for additional protected files you want staged into the per-run agent dir under `secrets/`
+- `modeModels` for declarative primary/alternate model selection by mode
+- `extraExtensions` for additional Pi extensions to register
+- `extraRuntimeTools` for additional runtime packages available to Cogitator
+- `defaultProjectId` to preselect a default project slug at startup
+
+The flake also exports a Home Manager module as `homeManagerModules.default`. Its current options are:
+
+- `ai.cogitator.enable`
+- `ai.cogitator.plainEnv`
+- `ai.cogitator.secretEnvFiles`
+- `ai.cogitator.providerConfigs`
+- `ai.cogitator.modeModels`
+- `ai.cogitator.extraExtensions`
+- `ai.cogitator.extraRuntimeTools`
+- `ai.cogitator.defaultProjectId`
+- `ai.cogitator.package` (`"piSandbox"` or `"cogitatorInitProject"`)
 
 ### Azure / APIM provider configuration
 
@@ -259,7 +276,67 @@ You can call the factory from your main flake with:
 
 Primary/alternate models for `/plan` and `/normal` can be configured declaratively through the `modeModels` argument to `mkCogitator`.
 
-Conceptual example from a Home Manager / `sops-nix` environment:
+Conceptual examples from a Home Manager / `sops-nix` environment:
+
+Using the exported Home Manager module:
+
+```nix
+{
+  imports = [ inputs.cogitator.homeManagerModules.default ];
+
+  nixpkgs.overlays = [ inputs.cogitator.overlays.default ];
+
+  ai.cogitator = {
+    enable = true;
+    package = "piSandbox";
+    defaultProjectId = "your-project-slug";
+
+    providerConfigs = {
+      varda-ai = {                  # NOT "azure" — avoids pi's Azure URL rewriting
+        baseUrl = "https://<apim-host>/openai/v1";
+        api = "openai-responses";
+        auth = {
+          type = "header";
+          header = "api-key";
+        };
+        apiKeyFile = config.sops.secrets.azure_api_key.path;
+        # models must be a list of objects — plain strings fail schema validation
+        models = [ { id = "gpt-5.4"; } { id = "gpt-5.4-kaddu"; } ];
+      };
+    };
+
+    modeModels = {
+      plan = {
+        primary = {
+          provider = "anthropic";
+          modelId = "claude-opus-4.8";
+        };
+        alternate = {
+          provider = "varda-ai";
+          modelId = "gpt-5.4-kaddu";
+        };
+      };
+      normal = {
+        primary = {
+          provider = "varda-ai";
+          modelId = "gpt-5.4-kaddu";
+        };
+        alternate = {
+          provider = "anthropic";
+          modelId = "claude-sonnet-4-6";
+        };
+      };
+    };
+
+    plainEnv = {
+      COGITATOR_DEFAULT_PROVIDER = "varda-ai";
+      COGITATOR_DEFAULT_MODEL = "gpt-5.4-kaddu";
+    };
+  };
+}
+```
+
+Or calling `mkCogitator` directly:
 
 ```nix
 {
@@ -269,7 +346,7 @@ Conceptual example from a Home Manager / `sops-nix` environment:
     cog = pkgs.cogitatorLib.mkCogitator {
       controlRoot = "/home/kaddu/.local/share/cogitator";
       providerConfigs = {
-        varda-ai = {                  # NOT "azure" — avoids pi's Azure URL rewriting
+        varda-ai = {
           baseUrl = "https://<apim-host>/openai/v1";
           api = "openai-responses";
           auth = {
@@ -277,7 +354,6 @@ Conceptual example from a Home Manager / `sops-nix` environment:
             header = "api-key";
           };
           apiKeyFile = config.sops.secrets.azure_api_key.path;
-          # models must be a list of objects — plain strings fail schema validation
           models = [ { id = "gpt-5.4"; } { id = "gpt-5.4-kaddu"; } ];
         };
       };
@@ -307,6 +383,7 @@ Conceptual example from a Home Manager / `sops-nix` environment:
         COGITATOR_DEFAULT_PROVIDER = "varda-ai";
         COGITATOR_DEFAULT_MODEL = "gpt-5.4-kaddu";
       };
+      defaultProjectId = "your-project-slug";
     };
   in [
     cog.piSandbox

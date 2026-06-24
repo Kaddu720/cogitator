@@ -5,6 +5,7 @@ Use this template for project state files in Cogitator.
 Design goals:
 - keep project context compact, durable, and easy to resume
 - preserve stable headings and canonical status vocabulary
+- make the first 200 lines a reliable default loader interface for summary-first resumes
 - separate current work, durable decisions, and short actionable lists
 - keep the system-managed shutdown snapshot in a dedicated block
 
@@ -15,6 +16,9 @@ Design goals:
 ## Executive Summary
 - Status: <todo|in_progress|blocked|done|deferred>
 - Goal: <one-sentence definition of success>
+- Current phase/focus: <short current-work summary>
+- Active blockers/open questions: <short summary or `[none]`>
+- Latest important decision: <short summary or `[none]`>
 
 ## Current Context
 - Primary repo: `<path>`
@@ -59,6 +63,12 @@ Design goals:
 ## Next Steps
 - <immediate next step>
 - <immediate next step>
+
+## Loader-Friendly Summary Rule
+Treat the first 200 lines of this file as the default loader interface.
+Keep enough current information above line 200 for an agent to resume work without reading deeper sections in the common case.
+That top section should cover status, goal, current focus, blockers/open questions, key decisions, key file locations, and next steps.
+Move longer history, detailed notes, and low-signal archival material below the loader-facing section.
 
 ## Session Shutdown Checkpoint
 This section is system-managed. Do not maintain it manually except when repairing a broken checkpoint block.
