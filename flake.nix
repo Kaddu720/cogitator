@@ -448,6 +448,9 @@ EOF
                 yt-dlp
                 nodejs_24
                 python3
+                kubectl
+                kubernetes-helm
+                terraform
               ])
               ++ lib.optionals isLinux (with pkgs; [
                 xdg-utils
