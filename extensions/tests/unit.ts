@@ -816,11 +816,27 @@ test("buildApprovalSummary: builds compact counts and labels", () => {
   assert.strictEqual(summary.needsRevision, 1);
   assert.strictEqual(summary.rejected, 1);
   assert.deepStrictEqual(summary.items.map((item) => item.label), [
-    "Change 1/2: a.ts — Edit A",
-    "Change 2/2: b.ts — Edit B",
-    "Change 3/3: c.ts — Edit C",
-    "Change 4/4: d.ts — Edit D",
-    "Change 5/5: e.ts — Edit E",
+    "a.ts — Edit A",
+    "b.ts — Edit B",
+    "c.ts — Edit C",
+    "d.ts — Edit D",
+    "e.ts — Edit E",
+  ]);
+});
+
+test("buildApprovalSummary: keeps compact labels free of proposal numbering", () => {
+  const summary = buildApprovalSummary([
+    makeProposal({
+      id: "change-1",
+      index: 7,
+      total: 9,
+      file: "workflow-mode.ts",
+      proposedEdit: "Trim approval payloads",
+      status: "pending",
+    }),
+  ]);
+  assert.deepStrictEqual(summary.items.map((item) => item.label), [
+    "workflow-mode.ts — Trim approval payloads",
   ]);
 });
 

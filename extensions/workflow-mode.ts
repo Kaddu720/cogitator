@@ -200,7 +200,7 @@ export function buildApprovalSummary(proposals: PendingProposal[]): ApprovalSumm
     else if (proposal.status === "rejected") summary.rejected += 1;
     summary.items.push({
       id: proposal.id,
-      label: `Change ${proposal.index}/${proposal.total}: ${proposal.file} — ${proposal.proposedEdit}`,
+      label: `${proposal.file} — ${proposal.proposedEdit}`,
       status: proposal.status,
       workflow: describeProposalWorkflowState(proposal, proposals),
     });
@@ -563,10 +563,11 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
 
   // ─── Approval UI orchestration ─────────────────────────────────────────────────
 
-  function dispatchApprovalDecision(ctx: ExtensionContext, message: string): void {
-    if (!message.trim()) return;
-    if (ctx.isIdle()) { pi.sendUserMessage(message); return; }
-    pi.sendUserMessage(message, { deliverAs: "followUp" });
+  function dispatchApprovalDecision(ctx: ExtensionContext, message: string, command?: string): void {
+    const payload = (command ?? message).trim();
+    if (!payload) return;
+    if (ctx.isIdle()) { pi.sendUserMessage(payload); return; }
+    pi.sendUserMessage(payload, { deliverAs: "followUp" });
   }
 
   async function promptForApproval(ctx: ExtensionContext): Promise<void> {
@@ -594,13 +595,13 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
           const message = approveSelectedProposals(hydratedApprovalDeps, ctx, [proposal.id]);
           state.approvalResumePending = true;
           ctx.ui.notify(message, "success");
-          dispatchApprovalDecision(ctx, message);
+          dispatchApprovalDecision(ctx, message, `approve ${proposal.id}`);
           return;
         }
-        if (choice === "Defer") { const note = await ctx.ui.input("Defer note", "Why should this proposal be deferred?"); const message = deferSelectedProposals(hydratedApprovalDeps, ctx, [proposal.id], note); ctx.ui.notify(message, "info"); dispatchApprovalDecision(ctx, message); return; }
+        if (choice === "Defer") { const note = await ctx.ui.input("Defer note", "Why should this proposal be deferred?"); const message = deferSelectedProposals(hydratedApprovalDeps, ctx, [proposal.id], note); ctx.ui.notify(message, "info"); dispatchApprovalDecision(ctx, message, note ? `defer ${proposal.id}: ${note}` : `defer ${proposal.id}`); return; }
         const note = await ctx.ui.input("Revision request", "What should change before approval?");
         const message = requestSelectedProposalRevision(hydratedApprovalDeps, ctx, [proposal.id], note);
-        ctx.ui.notify(message, "info"); dispatchApprovalDecision(ctx, message); return;
+        ctx.ui.notify(message, "info"); dispatchApprovalDecision(ctx, message, note ? `edit ${proposal.id}: ${note}` : `edit ${proposal.id}`); return;
       }
     } catch (error) {
       ctx.ui.notify(`Approval prompt failed: ${formatErrorDetails(error)}`, "warning");
@@ -914,7 +915,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         if (state.approvalResumePending && getApprovedProposals(hydratedApprovalDeps).length > 0) { state.approvalResumePending = false; return { action: "continue" as const }; }
         state.approvalResumePending = false; return { action: "continue" as const };
       }
-      if (raw === "a" || lower === "approve" || raw === "Approved. Apply only the previously proposed change set exactly as approved. Do not expand scope or modify other files.") {
+      if (raw === "a" || lower === "approve" || lower === "approved" || raw === "Approved. Apply only the previously proposed change set exactly as approved. Do not expand scope or modify other files.") {
         state.approvalPromptDeferred = false; return { action: "transform" as const, text: approvePendingProposals(hydratedApprovalDeps, ctx) };
       }
       const approveMatch = raw.match(/^(a|approve)\s+(.+)$/i);
