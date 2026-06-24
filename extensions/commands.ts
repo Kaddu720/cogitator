@@ -20,6 +20,8 @@ export interface CommandHandlers {
   project: CommandHandler;
   "new-project": CommandHandler;
   "project-status": CommandHandler;
+  memory: CommandHandler;
+  "refresh-memory": CommandHandler;
   "weekly-summary": CommandHandler;
   "approval-status": CommandHandler;
   reject: CommandHandler;
@@ -60,6 +62,16 @@ export function registerCommands(
   pi.registerCommand("project-status", {
     description: "Show the active project and workflow mode",
     handler: commands["project-status"],
+  });
+
+  pi.registerCommand("memory", {
+    description: "Show the current compact working-memory snapshot",
+    handler: commands.memory,
+  });
+
+  pi.registerCommand("refresh-memory", {
+    description: "Rebuild working memory from the active project state file",
+    handler: commands["refresh-memory"],
   });
 
   pi.registerCommand("weekly-summary", {

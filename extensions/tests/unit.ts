@@ -35,6 +35,8 @@ import {
 
 import {
   buildProjectStatusSnapshot,
+  buildWorkingMemorySnapshot,
+  parseWorkingMemorySnapshotFromCheckpointText,
   upsertShutdownCheckpointSection,
   formatShutdownTimestamp,
   SHUTDOWN_CHECKPOINT_HEADING,
@@ -361,6 +363,39 @@ test("buildProjectStatusSnapshot: extracts next steps", () => {
   assert.deepStrictEqual(snapshot.nextSteps, ["Step one", "Step two"]);
 });
 
+test("buildWorkingMemorySnapshot: extracts core fields", () => {
+  const md = `# Test\n\n## Executive Summary\n- Status: in_progress\n- Goal: Build the thing\n\n## Current Context\n- Current focus:\n  - Investigate cluster state\n  - Reduce context burn\n\n## Architecture Decisions\n- decision: Use summary-first project loading\n  rationale: Save context\n  date: 2026-06-24\n  owner: User\n  status: done\n\n## Key File Locations\n- \`projectStates/example.md\`: state file\n- \`artifacts/example/notes.md\`: notes\n\n## Progress Tracking\n- blocked:\n  - Waiting on final review\n- done:\n  - Baseline captured\n\n## Next Steps\n- Implement helper\n- Add tests\n`;
+  const memory = buildWorkingMemorySnapshot(md);
+  assert.strictEqual(memory.objective, "Build the thing");
+  assert.deepStrictEqual(memory.focus, ["Investigate cluster state", "Reduce context burn"]);
+  assert.deepStrictEqual(memory.blockers, ["Waiting on final review"]);
+  assert.deepStrictEqual(memory.decisions, ["Use summary-first project loading"]);
+  assert.deepStrictEqual(memory.nextSteps, ["Implement helper", "Add tests"]);
+  assert.deepStrictEqual(memory.keyFiles, ["projectStates/example.md", "artifacts/example/notes.md"]);
+  assert.strictEqual(memory.source, "project-state-summary");
+});
+
+test("buildWorkingMemorySnapshot: enforces caps", () => {
+  const md = `# Test\n\n## Executive Summary\n- Goal: Cap test\n\n## Current Context\n- Current focus:\n  - Focus 1\n  - Focus 2\n  - Focus 3\n  - Focus 4\n\n## Architecture Decisions\n- decision: D1\n  rationale: r\n  date: 2026-06-24\n  owner: U\n  status: done\n- decision: D2\n  rationale: r\n  date: 2026-06-24\n  owner: U\n  status: done\n- decision: D3\n  rationale: r\n  date: 2026-06-24\n  owner: U\n  status: done\n- decision: D4\n  rationale: r\n  date: 2026-06-24\n  owner: U\n  status: done\n\n## Key File Locations\n- \`a.md\`: a\n- \`b.md\`: b\n- \`c.md\`: c\n- \`d.md\`: d\n- \`e.md\`: e\n- \`f.md\`: f\n\n## Progress Tracking\n- blocked:\n  - B1\n  - B2\n  - B3\n  - B4\n\n## Next Steps\n- N1\n- N2\n- N3\n- N4\n`;
+  const memory = buildWorkingMemorySnapshot(md);
+  assert.deepStrictEqual(memory.focus, ["Focus 1", "Focus 2", "Focus 3"]);
+  assert.deepStrictEqual(memory.blockers, ["B1", "B2", "B3"]);
+  assert.deepStrictEqual(memory.decisions, ["D1", "D2", "D3"]);
+  assert.deepStrictEqual(memory.nextSteps, ["N1", "N2", "N3"]);
+  assert.deepStrictEqual(memory.keyFiles, ["a.md", "b.md", "c.md", "d.md", "e.md"]);
+});
+
+test("buildWorkingMemorySnapshot: handles missing sections", () => {
+  const md = `# Test\n\n## Executive Summary\n- Status: todo\n`;
+  const memory = buildWorkingMemorySnapshot(md);
+  assert.strictEqual(memory.objective, "[none]");
+  assert.deepStrictEqual(memory.focus, []);
+  assert.deepStrictEqual(memory.blockers, []);
+  assert.deepStrictEqual(memory.decisions, []);
+  assert.deepStrictEqual(memory.nextSteps, []);
+  assert.deepStrictEqual(memory.keyFiles, []);
+});
+
 test("upsertShutdownCheckpointSection: inserts when missing", () => {
   const original = "# Project\n\nSome content\n";
   const result = upsertShutdownCheckpointSection(original, "- key: value");
@@ -380,6 +415,67 @@ test("upsertShutdownCheckpointSection: replaces when present", () => {
 test("formatShutdownTimestamp: returns ISO-like string without millis", () => {
   const ts = formatShutdownTimestamp(new Date("2026-01-01T12:00:00.123Z"));
   assert.strictEqual(ts, "2026-01-01T12:00:00Z");
+});
+
+test("parseWorkingMemorySnapshotFromCheckpointText: restores persisted memory fields", () => {
+  const checkpoint = `# Session Shutdown Checkpoint\n\n## Project Status Snapshot\n- executive_status: in_progress\n- goal: Build the thing\n- current_focus: Investigate cluster state | Reduce context burn\n- progress_counts: todo=1, in_progress=2\n- next_steps: Implement helper | Add tests\n- memory_objective: Build the thing\n- memory_focus: Investigate cluster state | Reduce context burn\n- memory_blockers: Waiting on final review\n- memory_decisions: Use summary-first project loading\n- memory_next_steps: Implement helper | Add tests\n- memory_key_files: projectStates/example.md | artifacts/example/notes.md\n- memory_source: checkpoint\n`;
+  const memory = parseWorkingMemorySnapshotFromCheckpointText(checkpoint);
+  assert.strictEqual(memory.objective, "Build the thing");
+  assert.deepStrictEqual(memory.focus, ["Investigate cluster state", "Reduce context burn"]);
+  assert.deepStrictEqual(memory.blockers, ["Waiting on final review"]);
+  assert.deepStrictEqual(memory.decisions, ["Use summary-first project loading"]);
+  assert.deepStrictEqual(memory.nextSteps, ["Implement helper", "Add tests"]);
+  assert.deepStrictEqual(memory.keyFiles, ["projectStates/example.md", "artifacts/example/notes.md"]);
+  assert.strictEqual(memory.source, "checkpoint");
+});
+
+test("parseWorkingMemorySnapshotFromCheckpointText: falls back to goal/current_focus/next_steps", () => {
+  const checkpoint = `# Session Shutdown Checkpoint\n\n## Project Status Snapshot\n- goal: Fallback goal\n- current_focus: Focus 1 | Focus 2\n- next_steps: Next 1 | Next 2\n`;
+  const memory = parseWorkingMemorySnapshotFromCheckpointText(checkpoint);
+  assert.strictEqual(memory.objective, "Fallback goal");
+  assert.deepStrictEqual(memory.focus, ["Focus 1", "Focus 2"]);
+  assert.deepStrictEqual(memory.blockers, []);
+  assert.deepStrictEqual(memory.decisions, []);
+  assert.deepStrictEqual(memory.nextSteps, ["Next 1", "Next 2"]);
+  assert.deepStrictEqual(memory.keyFiles, []);
+  assert.strictEqual(memory.source, "checkpoint");
+});
+
+test("buildWorkingMemorySnapshot: provides display-ready empty markers", () => {
+  const md = `# Test\n\n## Executive Summary\n- Goal: Inspect memory display\n`;
+  const memory = buildWorkingMemorySnapshot(md);
+  const display = {
+    objective: memory.objective,
+    focus: memory.focus.length > 0 ? memory.focus.join(" | ") : "[none]",
+    blockers: memory.blockers.length > 0 ? memory.blockers.join(" | ") : "[none]",
+    decisions: memory.decisions.length > 0 ? memory.decisions.join(" | ") : "[none]",
+    nextSteps: memory.nextSteps.length > 0 ? memory.nextSteps.join(" | ") : "[none]",
+    keyFiles: memory.keyFiles.length > 0 ? memory.keyFiles.join(" | ") : "[none]",
+  };
+  assert.deepStrictEqual(display, {
+    objective: "Inspect memory display",
+    focus: "[none]",
+    blockers: "[none]",
+    decisions: "[none]",
+    nextSteps: "[none]",
+    keyFiles: "[none]",
+  });
+});
+
+test("buildWorkingMemorySnapshot: refreshed state replaces checkpoint-backed memory content", () => {
+  const checkpoint = `# Session Shutdown Checkpoint\n\n## Project Status Snapshot\n- memory_objective: Old objective\n- memory_focus: Old focus\n- memory_blockers: Old blocker\n- memory_decisions: Old decision\n- memory_next_steps: Old next\n- memory_key_files: old.md\n- memory_source: checkpoint\n`;
+  const restored = parseWorkingMemorySnapshotFromCheckpointText(checkpoint);
+  const stateMd = `# Test\n\n## Executive Summary\n- Goal: New objective\n\n## Current Context\n- Current focus:\n  - New focus\n\n## Architecture Decisions\n- decision: New decision\n  rationale: r\n  date: 2026-06-24\n  owner: U\n  status: done\n\n## Key File Locations\n- \`new.md\`: new\n\n## Progress Tracking\n- blocked:\n  - New blocker\n\n## Next Steps\n- New next\n`;
+  const refreshed = buildWorkingMemorySnapshot(stateMd);
+  assert.strictEqual(restored.objective, "Old objective");
+  assert.strictEqual(restored.source, "checkpoint");
+  assert.strictEqual(refreshed.objective, "New objective");
+  assert.deepStrictEqual(refreshed.focus, ["New focus"]);
+  assert.deepStrictEqual(refreshed.blockers, ["New blocker"]);
+  assert.deepStrictEqual(refreshed.decisions, ["New decision"]);
+  assert.deepStrictEqual(refreshed.nextSteps, ["New next"]);
+  assert.deepStrictEqual(refreshed.keyFiles, ["new.md"]);
+  assert.strictEqual(refreshed.source, "project-state-summary");
 });
 
 // ─── resources.ts ───────────────────────────────────────────────────────────────

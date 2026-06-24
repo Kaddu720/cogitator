@@ -21,6 +21,9 @@ import {
 } from "./projects.js";
 import {
   type WeeklySummaryState,
+  type WorkingMemorySnapshot,
+  buildWorkingMemorySnapshot,
+  parseWorkingMemorySnapshotFromCheckpointText,
   writeProjectShutdownCheckpoint,
   collectWeeklySummaryStates,
   collectTopWeeklySummaryItems,
@@ -64,6 +67,7 @@ import {
   hasReasonableSearchLimit,
   isBroadInspectionBash,
   isBroadSearchPath,
+  isBlockedInfraMutationCommand,
   isSafeCommand,
   isWindowedReadRequest,
   getRequestedReadLimit,
@@ -456,6 +460,15 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
 
   async function setActiveProject(project: ProjectRecord | null, ctx: ExtensionContext, notify = true): Promise<void> {
     state.activeProject = project;
+    state.workingMemory = null;
+    if (project) {
+      try {
+        const stateText = await readFile(getProjectStatePath(project), "utf8");
+        state.workingMemory = buildWorkingMemorySnapshot(stateText);
+      } catch {
+        state.workingMemory = null;
+      }
+    }
     persistProjectSelection(pi, project?.id ?? null);
     updateStatus(ctx);
     if (!notify || !ctx.hasUI) return;
@@ -526,9 +539,43 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       if (state.canonicalCheckoutPath) lines.push(`Canonical checkout: ${state.canonicalCheckoutPath}`);
       if (state.activeProject) { lines.push(`Project: (${state.activeProject.id}) ${state.activeProject.name}${state.activeProject.status ? ` · ${state.activeProject.status}` : ""}`); lines.push(`State: ${getProjectStatePath(state.activeProject)}`); lines.push(`Artifacts: ${getProjectArtifactsPath(state.activeProject)}`); }
       else { lines.push("Project: none"); }
+      if (state.workingMemory) {
+        lines.push(`Memory objective: ${state.workingMemory.objective}`);
+        if (state.workingMemory.focus.length > 0) lines.push(`Memory focus: ${state.workingMemory.focus.join(" | ")}`);
+        if (state.workingMemory.nextSteps.length > 0) lines.push(`Memory next: ${state.workingMemory.nextSteps.join(" | ")}`);
+      }
       const needingApproval = getPendingApprovalProposals(approvalDeps);
       if (needingApproval.length > 0) { lines.push(`Pending approvals: ${needingApproval.length}`); for (const p of needingApproval) lines.push(`- Change ${p.index}/${p.total}: ${p.file} — ${p.proposedEdit} [${p.status}]`); }
       if (ctx.hasUI) ctx.ui.notify(lines.join("\n"), "info");
+    },
+
+    memory: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      if (!state.activeProject) { ctx.ui.notify("Load a project first with /project before inspecting working memory.", "warning"); return; }
+      if (!state.workingMemory) { ctx.ui.notify("No working memory is loaded for the active project.", "info"); return; }
+      const lines = [
+        `Project: (${state.activeProject.id}) ${state.activeProject.name}`,
+        `Source: ${state.workingMemory.source}`,
+        `Objective: ${state.workingMemory.objective}`,
+        `Focus: ${state.workingMemory.focus.length > 0 ? state.workingMemory.focus.join(" | ") : "[none]"}`,
+        `Blockers: ${state.workingMemory.blockers.length > 0 ? state.workingMemory.blockers.join(" | ") : "[none]"}`,
+        `Decisions: ${state.workingMemory.decisions.length > 0 ? state.workingMemory.decisions.join(" | ") : "[none]"}`,
+        `Next steps: ${state.workingMemory.nextSteps.length > 0 ? state.workingMemory.nextSteps.join(" | ") : "[none]"}`,
+        `Key files: ${state.workingMemory.keyFiles.length > 0 ? state.workingMemory.keyFiles.join(" | ") : "[none]"}`,
+      ];
+      ctx.ui.notify(lines.join("\n"), "info");
+    },
+
+    "refresh-memory": async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      if (!state.activeProject) { ctx.ui.notify("Load a project first with /project before refreshing working memory.", "warning"); return; }
+      try {
+        const stateText = await readFile(getProjectStatePath(state.activeProject), "utf8");
+        state.workingMemory = buildWorkingMemorySnapshot(stateText);
+        ctx.ui.notify(`Working memory refreshed for (${state.activeProject.id}) ${state.activeProject.name}.`, "success");
+      } catch (error) {
+        ctx.ui.notify(`Failed to refresh working memory: ${String(error)}`, "warning");
+      }
     },
 
     "weekly-summary": async (_args, ctx) => {
@@ -610,7 +657,24 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       if (typeof preferredProjectId === "string") {
         const projects = await loadProjects();
         state.activeProject = projects.find((p) => p.id === preferredProjectId) ?? null;
-        if (state.activeProject) persistProjectSelection(pi, state.activeProject.id);
+        if (state.activeProject) {
+          persistProjectSelection(pi, state.activeProject.id);
+          try {
+            const shutdownText = await readFile(resolve(getProjectArtifactsPath(state.activeProject), "latest-shutdown.md"), "utf8");
+            const restoredMemory = parseWorkingMemorySnapshotFromCheckpointText(shutdownText);
+            state.workingMemory = restoredMemory.objective ? {
+              objective: restoredMemory.objective,
+              focus: restoredMemory.focus ?? [],
+              blockers: restoredMemory.blockers ?? [],
+              decisions: restoredMemory.decisions ?? [],
+              nextSteps: restoredMemory.nextSteps ?? [],
+              keyFiles: restoredMemory.keyFiles ?? [],
+              source: "checkpoint",
+            } : null;
+          } catch {
+            state.workingMemory = null;
+          }
+        }
       }
       if (ctx.hasUI && !state.activeProject) { await selectProject(ctx); }
       pi.setActiveTools(getActiveToolsForMode(state.currentMode));
@@ -628,8 +692,28 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         canonicalCheckoutPath: state.canonicalCheckoutPath,
       });
       const restoredProjectId = restoreStoredProjectId(ctx);
-      if (restoredProjectId === null) { state.activeProject = null; }
-      else if (typeof restoredProjectId === "string") { const projects = await loadProjects(); state.activeProject = projects.find((p) => p.id === restoredProjectId) ?? null; }
+      if (restoredProjectId === null) { state.activeProject = null; state.workingMemory = null; }
+      else if (typeof restoredProjectId === "string") {
+        const projects = await loadProjects();
+        state.activeProject = projects.find((p) => p.id === restoredProjectId) ?? null;
+        if (state.activeProject) {
+          try {
+            const shutdownText = await readFile(resolve(getProjectArtifactsPath(state.activeProject), "latest-shutdown.md"), "utf8");
+            const restoredMemory = parseWorkingMemorySnapshotFromCheckpointText(shutdownText);
+            state.workingMemory = restoredMemory.objective ? {
+              objective: restoredMemory.objective,
+              focus: restoredMemory.focus ?? [],
+              blockers: restoredMemory.blockers ?? [],
+              decisions: restoredMemory.decisions ?? [],
+              nextSteps: restoredMemory.nextSteps ?? [],
+              keyFiles: restoredMemory.keyFiles ?? [],
+              source: "checkpoint",
+            } : null;
+          } catch {
+            state.workingMemory = null;
+          }
+        }
+      }
       pi.setActiveTools(getActiveToolsForMode(state.currentMode));
       updateStatus(ctx);
     },
@@ -644,6 +728,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
           canonicalCheckoutPath: state.canonicalCheckoutPath,
           sessionFile: ctx.sessionManager.getSessionFile() ?? "ephemeral",
           proposals: ps(),
+          workingMemory: state.workingMemory,
           actionableProposalCount: getPendingApprovalProposals(approvalDeps).length,
         });
       } catch (error) { if (ctx.hasUI) ctx.ui.notify(`Failed to save shutdown checkpoint: ${String(error)}`, "warning"); }
@@ -725,6 +810,12 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         if (event.toolName === "bash") {
           const command = String(event.input.command ?? "");
           if (/\bsops\b/i.test(command)) return { block: true, reason: "Access to the sops command is blocked." };
+          if (isBlockedInfraMutationCommand(command)) {
+            return {
+              block: true,
+              reason: "Mutating kubectl/helm/terraform commands are blocked at the harness level. Read-only live inspection is allowed, but actual cluster and infrastructure changes must be performed by the user.",
+            };
+          }
         }
 
         // External write guard: confirm before any MCP write operation (Jira, Confluence, etc.)

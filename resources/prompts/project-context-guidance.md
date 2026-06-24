@@ -2,5 +2,6 @@ At session start or resume, if an active project is loaded, review the active pr
 
 In-session behavior:
 - Do not reread the project state file or shutdown artifact on every task. You already have that context from the first turn.
-- Only reread them when the user explicitly asks for a refresh, or when you have reason to believe the files changed (for example, after writing to the state file).
+- After the initial project summary load, rely on the compact in-session working memory for objective, focus, blockers, next steps, and key references unless a refresh is actually needed.
+- Only reread project-tracking files when the user explicitly asks for a refresh, when you have reason to believe the files changed (for example, after writing to the state file), or when the current task clearly depends on deeper project history.
 - For all other repo work — searching, reading code, answering questions — rely on the context you already have without re-checking project tracking files first.

@@ -124,6 +124,16 @@ export interface ProjectStatusSnapshot {
   progressCounts: Record<string, number>;
 }
 
+export interface WorkingMemorySnapshot {
+  objective: string;
+  focus: string[];
+  blockers: string[];
+  decisions: string[];
+  nextSteps: string[];
+  keyFiles: string[];
+  source: "project-state-summary" | "checkpoint";
+}
+
 export function parseProjectStatusSnapshotFromCheckpointText(markdown: string): Partial<ProjectStatusSnapshot> {
   const snapshotSection = extractMarkdownSection(markdown, "Project Status Snapshot");
   const checkpointBody = extractShutdownCheckpointBody(markdown);
@@ -136,6 +146,23 @@ export function parseProjectStatusSnapshotFromCheckpointText(markdown: string): 
     currentFocus: parseCompactItemSummary(extractTopLevelBulletValue(source, "current_focus")),
     nextSteps: parseCompactItemSummary(extractTopLevelBulletValue(source, "next_steps")),
     progressCounts: parseProgressCounts(extractTopLevelBulletValue(source, "progress_counts")),
+  };
+}
+
+export function parseWorkingMemorySnapshotFromCheckpointText(markdown: string): Partial<WorkingMemorySnapshot> {
+  const snapshotSection = extractMarkdownSection(markdown, "Project Status Snapshot");
+  const checkpointBody = extractShutdownCheckpointBody(markdown);
+  const source = snapshotSection || checkpointBody;
+  if (!source) return {};
+
+  return {
+    objective: extractTopLevelBulletValue(source, "memory_objective") || extractTopLevelBulletValue(source, "goal") || undefined,
+    focus: parseCompactItemSummary(extractTopLevelBulletValue(source, "memory_focus") || extractTopLevelBulletValue(source, "current_focus")),
+    blockers: parseCompactItemSummary(extractTopLevelBulletValue(source, "memory_blockers")),
+    decisions: parseCompactItemSummary(extractTopLevelBulletValue(source, "memory_decisions")),
+    nextSteps: parseCompactItemSummary(extractTopLevelBulletValue(source, "memory_next_steps") || extractTopLevelBulletValue(source, "next_steps")),
+    keyFiles: parseCompactItemSummary(extractTopLevelBulletValue(source, "memory_key_files")),
+    source: "checkpoint",
   };
 }
 
@@ -167,6 +194,47 @@ export function buildProjectStatusSnapshot(stateText: string): ProjectStatusSnap
           deferred: countItems("deferred"),
         }
       : (checkpointSnapshot.progressCounts ?? { todo: 0, in_progress: 0, blocked: 0, done: 0, deferred: 0 }),
+  };
+}
+
+export function buildWorkingMemorySnapshot(stateText: string): WorkingMemorySnapshot {
+  const executiveSummary = extractMarkdownSection(stateText, "Executive Summary");
+  const context = extractMarkdownSection(stateText, "Current Context") || extractMarkdownSection(stateText, "Background & Context");
+  const decisionsSection = extractMarkdownSection(stateText, "Architecture Decisions");
+  const progressTracking = extractMarkdownSection(stateText, "Progress Tracking");
+  const nextStepsSection = extractMarkdownSection(stateText, "Next Steps");
+  const keyFileSection = extractMarkdownSection(stateText, "Key File Locations");
+
+  const take = (items: string[], max: number) => items.filter(Boolean).slice(0, max);
+  const nextSteps = take(
+    nextStepsSection
+      .split(/\r?\n/)
+      .map((line) => line.match(/^\s*-\s+(.*)$/)?.[1]?.trim() ?? ""),
+    3,
+  );
+  const keyFiles = take(
+    keyFileSection
+      .split(/\r?\n/)
+      .map((line) => line.match(/^\s*-\s+`?([^`:\n]+(?:`?[^:\n]*)?)\s*:/)?.[1]?.replace(/`/g, "").trim() ?? "")
+      .filter(Boolean),
+    5,
+  );
+  const decisions = take(
+    decisionsSection
+      .split(/\r?\n/)
+      .map((line) => line.match(/^\s*-\s*decision:\s*(.*)$/i)?.[1]?.trim() ?? "")
+      .filter(Boolean),
+    3,
+  );
+
+  return {
+    objective: extractTopLevelBulletValue(executiveSummary, "Goal") || "[none]",
+    focus: take(extractIndentedBulletsAfterLabel(context, "current focus"), 3),
+    blockers: take(extractIndentedBulletsAfterLabel(progressTracking, "blocked").filter((item) => item.trim().toLowerCase() !== "none recorded."), 3),
+    decisions,
+    nextSteps,
+    keyFiles,
+    source: "project-state-summary",
   };
 }
 
@@ -272,6 +340,7 @@ export interface ShutdownCheckpointInput {
   canonicalCheckoutPath?: string;
   sessionFile: string;
   proposals: PendingProposal[];
+  workingMemory?: WorkingMemorySnapshot | null;
   /** Pre-computed by caller: proposals.filter(p => p.status === 'pending' && isProposalActionable(...)).length */
   actionableProposalCount: number;
 }
@@ -282,7 +351,7 @@ export interface ShutdownCheckpointInput {
  * formatting lives in project-state.ts.
  */
 export async function writeProjectShutdownCheckpoint(input: ShutdownCheckpointInput): Promise<void> {
-  const { project, mode, repoRoot, canonicalCheckoutPath, sessionFile, proposals, actionableProposalCount } = input;
+  const { project, mode, repoRoot, canonicalCheckoutPath, sessionFile, proposals, workingMemory, actionableProposalCount } = input;
   const timestamp = formatShutdownTimestamp();
   const artifactsPath = getProjectArtifactsPath(project);
   const artifactPath = resolve(artifactsPath, "latest-shutdown.md");
@@ -293,6 +362,7 @@ export async function writeProjectShutdownCheckpoint(input: ShutdownCheckpointIn
   let stateText = `# ${project.name}\n`;
   try { stateText = await readFile(statePath, "utf8"); } catch { /* use fallback */ }
   const statusSnapshot = buildProjectStatusSnapshot(stateText);
+  const memorySnapshot = workingMemory ?? buildWorkingMemorySnapshot(stateText);
   const progressCounts = Object.entries(statusSnapshot.progressCounts).map(([l, c]) => `${l}=${c}`).join(", ");
   const artifactContent = [
     "# Session Shutdown Checkpoint", "",
@@ -303,7 +373,15 @@ export async function writeProjectShutdownCheckpoint(input: ShutdownCheckpointIn
     "## Project Status Snapshot",
     `- executive_status: ${statusSnapshot.executiveStatus}`, `- goal: ${statusSnapshot.goal}`,
     `- current_focus: ${summarizeItems(statusSnapshot.currentFocus)}`, `- progress_counts: ${progressCounts}`,
-    `- next_steps: ${summarizeItems(statusSnapshot.nextSteps)}`, "", "## Pending Proposals", proposalLines, "",
+    `- next_steps: ${summarizeItems(statusSnapshot.nextSteps)}`,
+    `- memory_objective: ${memorySnapshot.objective}`,
+    `- memory_focus: ${summarizeItems(memorySnapshot.focus)}`,
+    `- memory_blockers: ${summarizeItems(memorySnapshot.blockers)}`,
+    `- memory_decisions: ${summarizeItems(memorySnapshot.decisions)}`,
+    `- memory_next_steps: ${summarizeItems(memorySnapshot.nextSteps)}`,
+    `- memory_key_files: ${summarizeItems(memorySnapshot.keyFiles)}`,
+    `- memory_source: ${memorySnapshot.source}`,
+    "", "## Pending Proposals", proposalLines, "",
   ].join("\n");
   await mkdir(artifactsPath, { recursive: true });
   await writeFile(artifactPath, artifactContent, "utf8");
