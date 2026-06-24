@@ -450,7 +450,6 @@ EOF
                 python3
                 kubectl
                 kubernetes-helm
-                terraform
               ])
               ++ lib.optionals isLinux (with pkgs; [
                 xdg-utils
