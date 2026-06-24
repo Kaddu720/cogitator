@@ -328,6 +328,11 @@ function mergeGuestPath(env: NodeJS.ProcessEnv | undefined): Record<string, stri
 	return result;
 }
 
+function wrapCommandWithGuestPath(command: string): string {
+	const escaped = command.replace(/'/g, `'"'"'`);
+	return `export PATH="/gondolin-tools/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"; bash -lc '${escaped}'`;
+}
+
 function createGondolinBashOps(vm: VM, localCwd: string, shellPath: string): BashOperations {
 	return {
 		exec: async (command, cwd, { onData, signal, timeout, env }) => {
@@ -347,7 +352,7 @@ function createGondolinBashOps(vm: VM, localCwd: string, shellPath: string): Bas
 					: undefined;
 
 			try {
-				const proc = vm.exec([shellPath, "-lc", command], {
+				const proc = vm.exec([shellPath, "-lc", wrapCommandWithGuestPath(command)], {
 					cwd: guestCwd,
 					env: mergeGuestPath(env),
 					signal: controller.signal,
