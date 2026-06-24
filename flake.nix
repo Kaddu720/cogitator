@@ -244,13 +244,12 @@ EOF
         };
 
         # Pi extension that routes pi's read/write/edit/bash into the Gondolin
-        # micro-VM. Uses the version-aligned example bundled in the pi package,
-        # placed outside node_modules so jiti transforms its TypeScript, with the
-        # gondolin SDK and pi core resolvable as peer deps.
+        # micro-VM. Kept as a repo-local copy so guest VM provisioning can be
+        # customized in-repo while still resolving gondolin SDK + pi core as peers.
         gondolinExtPkg = pkgs.runCommand "pi-extension-gondolin" {} ''
           dir="$out/share/pi-extension-gondolin"
           mkdir -p "$dir"
-          cp -r ${piBasePkg}/share/pi/examples/extensions/gondolin/. "$dir/"
+          cp -r ${./extensions/gondolin}/. "$dir/"
           chmod -R u+w "$dir"
           nm="$dir/node_modules/@earendil-works"
           mkdir -p "$nm"
