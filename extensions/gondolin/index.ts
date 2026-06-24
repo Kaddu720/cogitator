@@ -322,6 +322,12 @@ function sanitizeEnv(env: NodeJS.ProcessEnv | undefined): Record<string, string>
 	return result;
 }
 
+function mergeGuestPath(env: NodeJS.ProcessEnv | undefined): Record<string, string> {
+	const result = sanitizeEnv(env) ?? {};
+	result.PATH = `/gondolin-tools/bin:${result.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`;
+	return result;
+}
+
 function createGondolinBashOps(vm: VM, localCwd: string, shellPath: string): BashOperations {
 	return {
 		exec: async (command, cwd, { onData, signal, timeout, env }) => {
@@ -343,7 +349,7 @@ function createGondolinBashOps(vm: VM, localCwd: string, shellPath: string): Bas
 			try {
 				const proc = vm.exec([shellPath, "-lc", command], {
 					cwd: guestCwd,
-					env: sanitizeEnv(env),
+					env: mergeGuestPath(env),
 					signal: controller.signal,
 					stdout: "pipe",
 					stderr: "pipe",
