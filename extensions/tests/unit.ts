@@ -61,6 +61,8 @@ import {
 import {
   buildPromptInjectionSignature,
   shouldInjectPromptFragments,
+  buildProjectContextSignature,
+  shouldInjectProjectContext,
   buildApprovalSummary,
   emptyApprovalSummary,
 } from "../workflow-mode.js";
@@ -637,6 +639,116 @@ test("buildPromptInjectionSignature: changes when workspace context availability
   });
   assert.notStrictEqual(withContext, withoutContext);
   assert.strictEqual(shouldInjectPromptFragments(withContext, withoutContext), true);
+});
+
+test("buildProjectContextSignature: stays stable for unchanged inputs", () => {
+  const workingMemory = {
+    objective: "Ship the workflow cleanup",
+    focus: ["lazy context injection"],
+    blockers: [],
+    decisions: ["prefer compact summaries"],
+    nextSteps: ["add tests"],
+    keyFiles: ["cogitator/extensions/workflow-mode.ts"],
+    source: "checkpoint" as const,
+  };
+  const a = buildProjectContextSignature({
+    mode: "plan",
+    projectId: "workflow-tool-research-codex-vs-pi-dev",
+    workingMemory,
+    approvalSummary: {
+      actionable: 1,
+      pending: 2,
+      approved: 0,
+      deferred: 0,
+      needsRevision: 0,
+      rejected: 0,
+    },
+  });
+  const b = buildProjectContextSignature({
+    mode: "plan",
+    projectId: "workflow-tool-research-codex-vs-pi-dev",
+    workingMemory,
+    approvalSummary: {
+      actionable: 1,
+      pending: 2,
+      approved: 0,
+      deferred: 0,
+      needsRevision: 0,
+      rejected: 0,
+    },
+  });
+  assert.strictEqual(a, b);
+  assert.strictEqual(shouldInjectProjectContext(a, b), false);
+});
+
+test("buildProjectContextSignature: changes when project memory or approvals change", () => {
+  const base = buildProjectContextSignature({
+    mode: "plan",
+    projectId: "workflow-tool-research-codex-vs-pi-dev",
+    workingMemory: {
+      objective: "Ship the workflow cleanup",
+      focus: ["lazy context injection"],
+      blockers: [],
+      decisions: [],
+      nextSteps: ["add tests"],
+      keyFiles: ["cogitator/extensions/workflow-mode.ts"],
+      source: "project-state-summary",
+    },
+    approvalSummary: {
+      actionable: 1,
+      pending: 1,
+      approved: 0,
+      deferred: 0,
+      needsRevision: 0,
+      rejected: 0,
+    },
+  });
+  const changedMemory = buildProjectContextSignature({
+    mode: "plan",
+    projectId: "workflow-tool-research-codex-vs-pi-dev",
+    workingMemory: {
+      objective: "Ship the workflow cleanup",
+      focus: ["lazy context injection", "approval hydration"],
+      blockers: [],
+      decisions: [],
+      nextSteps: ["add tests"],
+      keyFiles: ["cogitator/extensions/workflow-mode.ts"],
+      source: "project-state-summary",
+    },
+    approvalSummary: {
+      actionable: 1,
+      pending: 1,
+      approved: 0,
+      deferred: 0,
+      needsRevision: 0,
+      rejected: 0,
+    },
+  });
+  const changedApprovals = buildProjectContextSignature({
+    mode: "plan",
+    projectId: "workflow-tool-research-codex-vs-pi-dev",
+    workingMemory: {
+      objective: "Ship the workflow cleanup",
+      focus: ["lazy context injection"],
+      blockers: [],
+      decisions: [],
+      nextSteps: ["add tests"],
+      keyFiles: ["cogitator/extensions/workflow-mode.ts"],
+      source: "project-state-summary",
+    },
+    approvalSummary: {
+      actionable: 0,
+      pending: 0,
+      approved: 1,
+      deferred: 0,
+      needsRevision: 0,
+      rejected: 0,
+    },
+  });
+  assert.notStrictEqual(base, changedMemory);
+  assert.notStrictEqual(base, changedApprovals);
+  assert.strictEqual(shouldInjectProjectContext(base, changedMemory), true);
+  assert.strictEqual(shouldInjectProjectContext(base, changedApprovals), true);
 });
 
 test("emptyApprovalSummary: returns zeroed compact state", () => {

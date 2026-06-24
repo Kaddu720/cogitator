@@ -42,7 +42,7 @@ import {
   markCompletedProposals,
   mergePendingProposals,
 } from "./approvals/policy.js";
-import { persistApprovalGateState, restoreNormalizedProposals } from "./approvals/state.js";
+import { persistApprovalGateState, restoreApprovalSummaryState, restoreNormalizedProposals } from "./approvals/state.js";
 import {
   type ApprovalActionDeps,
   getPendingApprovalProposals,
@@ -133,6 +133,19 @@ export function shouldInjectPromptFragments(lastSignature: string | undefined, n
   return lastSignature !== nextSignature;
 }
 
+export function buildProjectContextSignature(input: {
+  mode: Mode;
+  projectId: string | null;
+  workingMemory: WorkingMemorySnapshot | null;
+  approvalSummary: Pick<ApprovalSummaryState, "actionable" | "pending" | "approved" | "deferred" | "needsRevision" | "rejected">;
+}): string {
+  return JSON.stringify(input);
+}
+
+export function shouldInjectProjectContext(lastSignature: string | undefined, nextSignature: string): boolean {
+  return lastSignature !== nextSignature;
+}
+
 // ─── Runtime state ──────────────────────────────────────────────────────────────
 
 interface ReadLedgerEntry {
@@ -202,12 +215,15 @@ interface WorkflowRuntimeState {
   canonicalCheckoutPath?: string;
   pendingProposals: PendingProposal[];
   approvalSummary: ApprovalSummaryState;
+  approvalDetailsHydrated: boolean;
   approvalPromptInFlight: boolean;
   approvalPromptDeferred: boolean;
   approvalResumePending: boolean;
   proposalOnlyRequested: boolean;
   readLedger: Map<string, ReadLedgerEntry>;
   lastInjectedPromptSignature?: string;
+  lastProjectContextSignature?: string;
+  lastProjectContextMessage?: string;
 }
 
 // ─── Extension entry point ──────────────────────────────────────────────────────
@@ -218,6 +234,24 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
   function setPendingProposals(updated: PendingProposal[]): void {
     state.pendingProposals = updated;
     state.approvalSummary = buildApprovalSummary(updated);
+    state.approvalDetailsHydrated = true;
+  }
+
+  function setApprovalSummary(summary: ApprovalSummaryState): void {
+    state.approvalSummary = summary;
+  }
+
+  function setApprovalDetailsHydrated(hydrated: boolean): void {
+    state.approvalDetailsHydrated = hydrated;
+  }
+
+  function hydrateApprovalDetails(ctx: ExtensionContext): PendingProposal[] {
+    if (state.approvalDetailsHydrated) return state.pendingProposals;
+    setPendingProposals(restoreNormalizedProposals(ctx, ctx.cwd, {
+      repoRoot: state.activeRepoRoot,
+      canonicalCheckoutPath: state.canonicalCheckoutPath,
+    }));
+    return state.pendingProposals;
   }
 
   async function reconcileSameFileProposalConflicts(ctx: ExtensionContext, proposals: PendingProposal[]): Promise<PendingProposal[]> {
@@ -258,17 +292,21 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     canonicalCheckoutPath: undefined,
     pendingProposals: [],
     approvalSummary: emptyApprovalSummary(),
+    approvalDetailsHydrated: true,
     approvalPromptInFlight: false,
     approvalPromptDeferred: false,
     approvalResumePending: false,
     proposalOnlyRequested: false,
     readLedger: new Map(),
     lastInjectedPromptSignature: undefined,
+    lastProjectContextSignature: undefined,
+    lastProjectContextMessage: undefined,
   };
 
   // ─── Proposal state accessors ─────────────────────────────────────────────────
 
   const ps = () => state.pendingProposals;
+  const hydratedPs = (ctx: ExtensionContext) => hydrateApprovalDetails(ctx);
 
   function getActiveToolsForMode(mode: Mode): string[] {
     const tools = getModeTools(baseTools, mode);
@@ -276,7 +314,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     return [...new Set([...tools, ...planResearchTools.filter((tool) => baseTools.includes(tool))])];
   }
 
-  function persistApprovalState(): void { persistApprovalGateState(pi, ps()); }
+  function persistApprovalState(): void { persistApprovalGateState(pi, ps(), state.approvalSummary); }
 
   // ─── Read ledger helpers ──────────────────────────────────────────────────────
 
@@ -516,6 +554,13 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     updateStatus,
   };
 
+  function getHydratedApprovalDeps(ctx: ExtensionContext): ApprovalActionDeps {
+    return {
+      ...approvalDeps,
+      proposals: () => hydratedPs(ctx),
+    };
+  }
+
   // ─── Approval UI orchestration ─────────────────────────────────────────────────
 
   function dispatchApprovalDecision(ctx: ExtensionContext, message: string): void {
@@ -525,11 +570,12 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
   }
 
   async function promptForApproval(ctx: ExtensionContext): Promise<void> {
-    if (!ctx.hasUI || getPendingApprovalProposals(approvalDeps).length === 0 || state.approvalPromptInFlight) return;
+    const hydratedApprovalDeps = getHydratedApprovalDeps(ctx);
+    if (!ctx.hasUI || getPendingApprovalProposals(hydratedApprovalDeps).length === 0 || state.approvalPromptInFlight) return;
     state.approvalPromptInFlight = true;
     try {
       const selectProposal = async (title: string): Promise<PendingProposal | undefined> => {
-        const pending = getPendingApprovalProposals(approvalDeps);
+        const pending = getPendingApprovalProposals(hydratedApprovalDeps);
         if (pending.length === 0) return undefined;
         const options = pending.map((p) => formatProposalMenuLabel(p));
         const choice = await ctx.ui.select(title, [...options, "Back"]);
@@ -537,23 +583,23 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         const index = options.indexOf(choice);
         return index >= 0 ? pending[index] : undefined;
       };
-      while (getPendingApprovalProposals(approvalDeps).length > 0) {
-        const proposalsNeedingApproval = getPendingApprovalProposals(approvalDeps);
+      while (getPendingApprovalProposals(hydratedApprovalDeps).length > 0) {
+        const proposalsNeedingApproval = getPendingApprovalProposals(hydratedApprovalDeps);
         const proposal = proposalsNeedingApproval.length === 1 ? proposalsNeedingApproval[0] : await selectProposal("Choose a proposed change to review");
         if (!proposal) return;
         const choice = await ctx.ui.select(`Review the proposal in the transcript, then choose an action for ${formatProposalMenuLabel(proposal)}.`, ["Approve", "Revise", "Defer"]);
         if (!choice) return;
         state.approvalPromptDeferred = false;
         if (choice === "Approve") {
-          const message = approveSelectedProposals(approvalDeps, ctx, [proposal.id]);
+          const message = approveSelectedProposals(hydratedApprovalDeps, ctx, [proposal.id]);
           state.approvalResumePending = true;
           ctx.ui.notify(message, "success");
           dispatchApprovalDecision(ctx, message);
           return;
         }
-        if (choice === "Defer") { const note = await ctx.ui.input("Defer note", "Why should this proposal be deferred?"); const message = deferSelectedProposals(approvalDeps, ctx, [proposal.id], note); ctx.ui.notify(message, "info"); dispatchApprovalDecision(ctx, message); return; }
+        if (choice === "Defer") { const note = await ctx.ui.input("Defer note", "Why should this proposal be deferred?"); const message = deferSelectedProposals(hydratedApprovalDeps, ctx, [proposal.id], note); ctx.ui.notify(message, "info"); dispatchApprovalDecision(ctx, message); return; }
         const note = await ctx.ui.input("Revision request", "What should change before approval?");
-        const message = requestSelectedProposalRevision(approvalDeps, ctx, [proposal.id], note);
+        const message = requestSelectedProposalRevision(hydratedApprovalDeps, ctx, [proposal.id], note);
         ctx.ui.notify(message, "info"); dispatchApprovalDecision(ctx, message); return;
       }
     } catch (error) {
@@ -706,7 +752,8 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     },
 
     "approval-status": async (_args, ctx) => {
-      if (ps().length === 0) { if (ctx.hasUI) ctx.ui.notify("No change proposals recorded for this session.", "info"); return; }
+      if (state.approvalSummary.total === 0) { if (ctx.hasUI) ctx.ui.notify("No change proposals recorded for this session.", "info"); return; }
+      hydratedPs(ctx);
       const lines = [
         "Change proposals:",
         `Summary: total=${state.approvalSummary.total}, actionable=${state.approvalSummary.actionable}, pending=${state.approvalSummary.pending}, approved=${state.approvalSummary.approved}, deferred=${state.approvalSummary.deferred}, needs-revision=${state.approvalSummary.needsRevision}, rejected=${state.approvalSummary.rejected}`,
@@ -761,10 +808,13 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       state.canonicalCheckoutPath = ctx.cwd;
       const restoredMode = restoreMode(ctx);
       state.currentMode = getRestoredStartupMode(restoredMode);
-      setPendingProposals(restoreNormalizedProposals(ctx, ctx.cwd, {
-        repoRoot: state.activeRepoRoot,
-        canonicalCheckoutPath: state.canonicalCheckoutPath,
-      }));
+      const restoredApprovalSummary = restoreApprovalSummaryState(ctx);
+      setApprovalSummary(restoredApprovalSummary ? {
+        ...emptyApprovalSummary(),
+        ...restoredApprovalSummary,
+      } : emptyApprovalSummary());
+      state.pendingProposals = [];
+      setApprovalDetailsHydrated(false);
       const preferredProjectId = restoreStoredProjectId(ctx) ?? process.env.COGITATOR_PROJECT_ID;
       if (typeof preferredProjectId === "string") {
         const projects = await loadProjects();
@@ -799,10 +849,13 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       state.canonicalCheckoutPath = ctx.cwd;
       const restoredMode = restoreMode(ctx);
       state.currentMode = getRestoredTreeMode(restoredMode);
-      setPendingProposals(restoreNormalizedProposals(ctx, ctx.cwd, {
-        repoRoot: state.activeRepoRoot,
-        canonicalCheckoutPath: state.canonicalCheckoutPath,
-      }));
+      const restoredApprovalSummary = restoreApprovalSummaryState(ctx);
+      setApprovalSummary(restoredApprovalSummary ? {
+        ...emptyApprovalSummary(),
+        ...restoredApprovalSummary,
+      } : emptyApprovalSummary());
+      state.pendingProposals = [];
+      setApprovalDetailsHydrated(false);
       const restoredProjectId = restoreStoredProjectId(ctx);
       if (restoredProjectId === null) { state.activeProject = null; state.workingMemory = null; }
       else if (typeof restoredProjectId === "string") {
@@ -839,9 +892,9 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
           repoRoot: state.activeRepoRoot,
           canonicalCheckoutPath: state.canonicalCheckoutPath,
           sessionFile: ctx.sessionManager.getSessionFile() ?? "ephemeral",
-          proposals: ps(),
+          proposals: state.approvalDetailsHydrated ? ps() : [],
           workingMemory: state.workingMemory,
-          actionableProposalCount: getPendingApprovalProposals(approvalDeps).length,
+          actionableProposalCount: state.approvalSummary.actionable,
         });
       } catch (error) { if (ctx.hasUI) ctx.ui.notify(`Failed to save shutdown checkpoint: ${String(error)}`, "warning"); }
     },
@@ -849,26 +902,27 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     input: async (event, ctx) => {
       const raw = event.text.trim();
       const lower = raw.toLowerCase();
+      const hydratedApprovalDeps = getHydratedApprovalDeps(ctx);
       state.proposalOnlyRequested = /(do not apply( it)? yet|don't apply( it)? yet|proposal-only|proposal only)/i.test(raw);
-      if (raw === "r" || lower === "reject") { state.approvalPromptDeferred = false; return { action: "transform" as const, text: rejectPendingProposals(approvalDeps, ctx) }; }
+      if (raw === "r" || lower === "reject") { state.approvalPromptDeferred = false; return { action: "transform" as const, text: rejectPendingProposals(hydratedApprovalDeps, ctx) }; }
       const rejectMatch = raw.match(/^(r|reject)\s+(.+)$/i);
-      if (rejectMatch) { state.approvalPromptDeferred = false; return { action: "transform" as const, text: rejectSelectedProposals(approvalDeps, ctx, parseSelectorList(rejectMatch[2])) }; }
-      if (raw === "d" || lower === "defer") { state.approvalPromptDeferred = false; return { action: "transform" as const, text: deferPendingProposals(approvalDeps, ctx) }; }
+      if (rejectMatch) { state.approvalPromptDeferred = false; return { action: "transform" as const, text: rejectSelectedProposals(hydratedApprovalDeps, ctx, parseSelectorList(rejectMatch[2])) }; }
+      if (raw === "d" || lower === "defer") { state.approvalPromptDeferred = false; return { action: "transform" as const, text: deferPendingProposals(hydratedApprovalDeps, ctx) }; }
       const deferMatch = raw.match(/^(d|defer)\s+(.+)$/i);
-      if (deferMatch) { state.approvalPromptDeferred = false; return { action: "transform" as const, text: deferSelectedProposals(approvalDeps, ctx, parseSelectorList(deferMatch[2])) }; }
-      if (getPendingApprovalProposals(approvalDeps).length === 0) {
-        if (state.approvalResumePending && getApprovedProposals(approvalDeps).length > 0) { state.approvalResumePending = false; return { action: "continue" as const }; }
+      if (deferMatch) { state.approvalPromptDeferred = false; return { action: "transform" as const, text: deferSelectedProposals(hydratedApprovalDeps, ctx, parseSelectorList(deferMatch[2])) }; }
+      if (getPendingApprovalProposals(hydratedApprovalDeps).length === 0) {
+        if (state.approvalResumePending && getApprovedProposals(hydratedApprovalDeps).length > 0) { state.approvalResumePending = false; return { action: "continue" as const }; }
         state.approvalResumePending = false; return { action: "continue" as const };
       }
       if (raw === "a" || lower === "approve" || raw === "Approved. Apply only the previously proposed change set exactly as approved. Do not expand scope or modify other files.") {
-        state.approvalPromptDeferred = false; return { action: "transform" as const, text: approvePendingProposals(approvalDeps, ctx) };
+        state.approvalPromptDeferred = false; return { action: "transform" as const, text: approvePendingProposals(hydratedApprovalDeps, ctx) };
       }
       const approveMatch = raw.match(/^(a|approve)\s+(.+)$/i);
-      if (approveMatch) { state.approvalPromptDeferred = false; return { action: "transform" as const, text: approveSelectedProposals(approvalDeps, ctx, parseSelectorList(approveMatch[2])) }; }
-      if (raw === "e" || lower === "edit") { state.approvalPromptDeferred = false; return { action: "transform" as const, text: requestProposalRevision(approvalDeps, ctx) }; }
+      if (approveMatch) { state.approvalPromptDeferred = false; return { action: "transform" as const, text: approveSelectedProposals(hydratedApprovalDeps, ctx, parseSelectorList(approveMatch[2])) }; }
+      if (raw === "e" || lower === "edit") { state.approvalPromptDeferred = false; return { action: "transform" as const, text: requestProposalRevision(hydratedApprovalDeps, ctx) }; }
       const editMatch = raw.match(/^(e|edit)\s+([^:]+?)(?:\s*:\s*(.+))?$/i);
-      if (editMatch) { state.approvalPromptDeferred = false; return { action: "transform" as const, text: requestSelectedProposalRevision(approvalDeps, ctx, parseSelectorList(editMatch[2]), editMatch[3]) }; }
-      if (state.approvalResumePending && getApprovedProposals(approvalDeps).length > 0) { state.approvalResumePending = false; return { action: "continue" as const }; }
+      if (editMatch) { state.approvalPromptDeferred = false; return { action: "transform" as const, text: requestSelectedProposalRevision(hydratedApprovalDeps, ctx, parseSelectorList(editMatch[2]), editMatch[3]) }; }
+      if (state.approvalResumePending && getApprovedProposals(hydratedApprovalDeps).length > 0) { state.approvalResumePending = false; return { action: "continue" as const }; }
       state.approvalResumePending = false;
       if (ctx.hasUI && !state.approvalPromptDeferred) { await promptForApproval(ctx); return { action: "handled" as const }; }
       return { action: "continue" as const };
@@ -902,8 +956,43 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         if (state.activeProject) additions.push(await readPromptFragment(PROJECT_CONTEXT_GUIDANCE_PROMPT_PATH));
         state.lastInjectedPromptSignature = promptSignature;
       }
-      if (!state.activeProject) { if (additions.length === 0) return; return { systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}` }; }
-      const message = { customType: "cogitator-project-context", content: await buildProjectContext(state.activeProject, event.cwd, state.canonicalCheckoutPath ?? state.activeRepoRoot, state.currentMode), display: false };
+      if (!state.activeProject) {
+        state.lastProjectContextSignature = undefined;
+        state.lastProjectContextMessage = undefined;
+        if (additions.length === 0) return;
+        return { systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}` };
+      }
+      const projectContextSignature = buildProjectContextSignature({
+        mode: state.currentMode,
+        projectId: state.activeProject.id,
+        workingMemory: state.workingMemory,
+        approvalSummary: {
+          actionable: state.approvalSummary.actionable,
+          pending: state.approvalSummary.pending,
+          approved: state.approvalSummary.approved,
+          deferred: state.approvalSummary.deferred,
+          needsRevision: state.approvalSummary.needsRevision,
+          rejected: state.approvalSummary.rejected,
+        },
+      });
+      const shouldInjectContext = shouldInjectProjectContext(state.lastProjectContextSignature, projectContextSignature);
+      const message = shouldInjectContext
+        ? {
+            customType: "cogitator-project-context",
+            content: await buildProjectContext(state.activeProject, event.cwd, state.canonicalCheckoutPath ?? state.activeRepoRoot, state.currentMode),
+            display: false,
+          }
+        : state.lastProjectContextMessage
+          ? { customType: "cogitator-project-context", content: state.lastProjectContextMessage, display: false }
+          : undefined;
+      if (shouldInjectContext && message) {
+        state.lastProjectContextSignature = projectContextSignature;
+        state.lastProjectContextMessage = message.content;
+      }
+      if (!message) {
+        if (additions.length === 0) return;
+        return { systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}` };
+      }
       if (additions.length === 0) return { message };
       return { message, systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}` };
     },
@@ -1072,8 +1161,9 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         if (toolDescriptor.writePolicy.unrestricted) {
           if (isMutationTool) {
             if (!isApprovalExemptPath(resolvedPath, state.activeProject)) {
-              const approvedProposal = beginApplyingProposalForPath(approvalDeps, resolvedPath, ctx);
-              if (!approvedProposal) return { block: true, reason: buildApprovalBlockedReason(resolvedPath, ps(), getResolutionBase(ctx.cwd, { repoRoot: state.activeRepoRoot, canonicalCheckoutPath: state.canonicalCheckoutPath }), { toolName: event.toolName, mutationSummary: describeMutation(event as { toolName: string; input: Record<string, unknown> }) }) };
+              const hydratedApprovalDeps = getHydratedApprovalDeps(ctx);
+              const approvedProposal = beginApplyingProposalForPath(hydratedApprovalDeps, resolvedPath, ctx);
+              if (!approvedProposal) return { block: true, reason: buildApprovalBlockedReason(resolvedPath, hydratedPs(ctx), getResolutionBase(ctx.cwd, { repoRoot: state.activeRepoRoot, canonicalCheckoutPath: state.canonicalCheckoutPath }), { toolName: event.toolName, mutationSummary: describeMutation(event as { toolName: string; input: Record<string, unknown> }) }) };
             }
           }
           return;
@@ -1089,8 +1179,9 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
           const allowed = resolvedPath === statePath || isSameOrWithin(resolvedPath, artifactsPath) || jiraAllowed;
           if (!allowed) return { block: true, reason: ["Plan mode only allows file mutations for the active project control files.", `Active project state file: ${statePath}`, `Active project artifacts directory: ${artifactsPath}`, `Allowed Jira draft path pattern: ${JIRA_TMP_PREFIX}<ISSUE-KEY>.txt`, `Requested path: ${resolvedPath}`, "Use /normal to edit repository files."].join("\n") };
           if (!isApprovalExemptPath(resolvedPath, state.activeProject)) {
-            const approvedProposal = beginApplyingProposalForPath(approvalDeps, resolvedPath, ctx);
-            if (!approvedProposal) return { block: true, reason: buildApprovalBlockedReason(resolvedPath, ps(), getResolutionBase(ctx.cwd, { repoRoot: state.activeRepoRoot, canonicalCheckoutPath: state.canonicalCheckoutPath }), { toolName: event.toolName, mutationSummary: describeMutation(event as { toolName: string; input: Record<string, unknown> }) }) };
+            const hydratedApprovalDeps = getHydratedApprovalDeps(ctx);
+            const approvedProposal = beginApplyingProposalForPath(hydratedApprovalDeps, resolvedPath, ctx);
+            if (!approvedProposal) return { block: true, reason: buildApprovalBlockedReason(resolvedPath, hydratedPs(ctx), getResolutionBase(ctx.cwd, { repoRoot: state.activeRepoRoot, canonicalCheckoutPath: state.canonicalCheckoutPath }), { toolName: event.toolName, mutationSummary: describeMutation(event as { toolName: string; input: Record<string, unknown> }) }) };
           }
         }
       } catch (error) {

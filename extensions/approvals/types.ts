@@ -51,8 +51,28 @@ export interface PendingProposal {
   supersededAt?: string;
 }
 
+export interface StoredApprovalSummaryItem {
+  id: string;
+  resolvedPath: string;
+  displayFile: string;
+  label: string;
+  status: ProposalStatus;
+}
+
+export interface StoredApprovalSummaryState {
+  total: number;
+  actionable: number;
+  pending: number;
+  approved: number;
+  deferred: number;
+  needsRevision: number;
+  rejected: number;
+  items: StoredApprovalSummaryItem[];
+}
+
 export interface StoredApprovalGateState {
   pending: PendingProposal[];
+  summary?: StoredApprovalSummaryState;
   /** Legacy field from path-count tracking; preserved for migration only. */
   approvedPathCounts?: Record<string, number>;
 }

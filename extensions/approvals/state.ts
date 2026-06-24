@@ -10,7 +10,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type PendingProposal, type StoredApprovalGateState } from "./types.js";
+import { type PendingProposal, type StoredApprovalGateState, type StoredApprovalSummaryState } from "./types.js";
 import { normalizePendingProposal } from "./parse.js";
 import { type ResolutionOptions, getResolutionBase } from "../projects.js";
 
@@ -65,8 +65,12 @@ export function normalizePendingProposals(
  * Append the current pending proposal array to the pi session branch as a
  * custom `approval-gate` entry. The latest entry wins on restore.
  */
-export function persistApprovalGateState(pi: ExtensionAPI, pending: PendingProposal[]): void {
-  pi.appendEntry<StoredApprovalGateState>("approval-gate", { pending });
+export function persistApprovalGateState(
+  pi: ExtensionAPI,
+  pending: PendingProposal[],
+  summary?: StoredApprovalSummaryState,
+): void {
+  pi.appendEntry<StoredApprovalGateState>("approval-gate", { pending, summary });
 }
 
 /**
@@ -92,4 +96,8 @@ export function restoreNormalizedProposals(ctx: ExtensionContext, cwd: string | 
   const stored = restoreApprovalGateState(ctx);
   const resolutionBase = getResolutionBase(cwd, options);
   return normalizePendingProposals(stored?.pending, resolutionBase, stored?.approvedPathCounts);
+}
+
+export function restoreApprovalSummaryState(ctx: ExtensionContext): StoredApprovalSummaryState | undefined {
+  return restoreApprovalGateState(ctx)?.summary;
 }
