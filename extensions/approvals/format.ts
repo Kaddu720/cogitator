@@ -15,7 +15,8 @@ import { type PendingProposal, type ProposalStatus } from "./types.js";
 export function isProposalStatus(value: unknown): value is ProposalStatus {
   return (
     value === "pending" || value === "approved" || value === "applying" ||
-    value === "applied" || value === "rejected" || value === "needs_revision" || value === "deferred"
+    value === "applied" || value === "rejected" || value === "needs_revision" || value === "deferred" ||
+    value === "superseded"
   );
 }
 

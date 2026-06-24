@@ -18,7 +18,8 @@ export type ProposalStatus =
   | "applied"
   | "rejected"
   | "needs_revision"
-  | "deferred";
+  | "deferred"
+  | "superseded";
 
 export interface PendingProposal {
   id: string;
@@ -41,10 +42,13 @@ export interface PendingProposal {
   sequenceKey?: string;
   revisionNote?: string;
   deferredNote?: string;
+  supersededById?: string;
+  supersededReason?: string;
   approvedAt?: string;
   applyingAt?: string;
   appliedAt?: string;
   deferredAt?: string;
+  supersededAt?: string;
 }
 
 export interface StoredApprovalGateState {

@@ -63,6 +63,19 @@ export function getRejectableProposals(deps: ApprovalActionDeps): PendingProposa
   return deps.proposals().filter((p) => p.status === "pending" || p.status === "approved" || p.status === "applying");
 }
 
+export function getSupersedableProposalsForPath(
+  deps: ApprovalActionDeps,
+  resolvedPath: string,
+  excludingId?: string,
+): PendingProposal[] {
+  return deps.proposals().filter(
+    (p) =>
+      p.resolvedPath === resolvedPath &&
+      p.id !== excludingId &&
+      (p.status === "pending" || p.status === "approved" || p.status === "applying" || p.status === "needs_revision" || p.status === "deferred"),
+  );
+}
+
 export function getProposalsForResolvedPath(deps: ApprovalActionDeps, resolvedPath: string): PendingProposal[] {
   return deps.proposals().filter((p) => p.resolvedPath === resolvedPath);
 }
@@ -121,7 +134,7 @@ export function updateProposalStatusById(
   deps: ApprovalActionDeps,
   ids: string[],
   status: ProposalStatus,
-  detail?: { revisionNote?: string; deferredNote?: string },
+  detail?: { revisionNote?: string; deferredNote?: string; supersededById?: string; supersededReason?: string },
 ): void {
   if (ids.length === 0) return;
   const idSet = new Set(ids);
@@ -133,7 +146,7 @@ export function updateProposalStatusBySelectors(
   deps: ApprovalActionDeps,
   selectors: string[],
   status: ProposalStatus,
-  detail?: { revisionNote?: string; deferredNote?: string },
+  detail?: { revisionNote?: string; deferredNote?: string; supersededById?: string; supersededReason?: string },
 ): PendingProposal[] {
   const allowedStatuses = getAllowedStatusesForTransition(status);
   const matched: PendingProposal[] = [];
@@ -159,6 +172,22 @@ export function beginApplyingProposalForPath(
   _ctx: ExtensionContext,
 ): PendingProposal | undefined {
   return findAuthorizedProposalForPath(deps, resolvedPath);
+}
+
+export function supersedeProposalsForPath(
+  deps: ApprovalActionDeps,
+  resolvedPath: string,
+  supersededById: string,
+  supersededReason = "Superseded by a newer proposal for the same file.",
+): PendingProposal[] {
+  const matched = getSupersedableProposalsForPath(deps, resolvedPath, supersededById);
+  updateProposalStatusById(
+    deps,
+    matched.map((proposal) => proposal.id),
+    "superseded",
+    { supersededById, supersededReason },
+  );
+  return matched;
 }
 
 // ─── User-facing action operations ─────────────────────────────────────────────

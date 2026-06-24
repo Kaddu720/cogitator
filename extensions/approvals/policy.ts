@@ -24,7 +24,7 @@ import { formatProposalSummary } from "./format.js";
 export function transitionProposalStatus(
   proposal: PendingProposal,
   status: ProposalStatus,
-  detail?: { revisionNote?: string; deferredNote?: string },
+  detail?: { revisionNote?: string; deferredNote?: string; supersededById?: string; supersededReason?: string },
 ): PendingProposal {
   const now = new Date().toISOString();
   if (status === "approved") return { ...proposal, status, approvedAt: now };
@@ -32,6 +32,15 @@ export function transitionProposalStatus(
   if (status === "applied") return { ...proposal, status, appliedAt: now };
   if (status === "needs_revision") return { ...proposal, status, revisionNote: detail?.revisionNote ?? proposal.revisionNote };
   if (status === "deferred") return { ...proposal, status, deferredAt: now, deferredNote: detail?.deferredNote ?? proposal.deferredNote };
+  if (status === "superseded") {
+    return {
+      ...proposal,
+      status,
+      supersededAt: now,
+      supersededById: detail?.supersededById ?? proposal.supersededById,
+      supersededReason: detail?.supersededReason ?? proposal.supersededReason,
+    };
+  }
   return { ...proposal, status };
 }
 
@@ -194,7 +203,8 @@ export function markCompletedProposals(
  * Rules:
  * - Existing `needs_revision` and `deferred` statuses reset to `pending` when the
  *   same proposal content is seen again (the author revised and reposted).
- * - Existing `applied`, `rejected`, `approved`, `applying` statuses are preserved.
+ * - Existing `applied`, `rejected`, `approved`, `applying`, and `superseded`
+ *   statuses are preserved.
  * - New proposals that don't match any existing ID get a stable variant suffix.
  *
  * Returns a new sorted array; does not mutate either input.
@@ -219,10 +229,13 @@ export function mergePendingProposals(current: PendingProposal[], next: PendingP
       sequenceKey: proposal.sequenceKey ?? existing?.sequenceKey,
       revisionNote: reset ? undefined : existing?.revisionNote,
       deferredNote: reset ? undefined : existing?.deferredNote,
+      supersededById: existing?.supersededById,
+      supersededReason: existing?.supersededReason,
       approvedAt: existing?.approvedAt,
       applyingAt: existing?.applyingAt,
       appliedAt: existing?.appliedAt,
       deferredAt: reset ? undefined : existing?.deferredAt,
+      supersededAt: existing?.supersededAt,
     });
   }
 

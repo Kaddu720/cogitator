@@ -31,7 +31,13 @@ import {
   mergePendingProposals,
   markCompletedProposals,
   describeProposalWorkflowState,
+  transitionProposalStatus,
 } from "../approvals/policy.js";
+
+import {
+  getSupersedableProposalsForPath,
+  supersedeProposalsForPath,
+} from "../approvals/actions.js";
 
 import {
   buildProjectStatusSnapshot,
@@ -704,6 +710,61 @@ test("buildApprovalSummary: builds compact counts and labels", () => {
     "Change 4/4: d.ts — Edit D",
     "Change 5/5: e.ts — Edit E",
   ]);
+});
+
+test("isProposalStatus: recognizes superseded", () => {
+  assert.strictEqual(isProposalStatus("superseded"), true);
+});
+
+test("transitionProposalStatus: stores supersession metadata", () => {
+  const result = transitionProposalStatus(makeProposal({ id: "old-change" }), "superseded", {
+    supersededById: "new-change",
+    supersededReason: "Superseded by a newer proposal for the same file.",
+  });
+  assert.strictEqual(result.status, "superseded");
+  assert.strictEqual(result.supersededById, "new-change");
+  assert.strictEqual(result.supersededReason, "Superseded by a newer proposal for the same file.");
+  assert.ok(result.supersededAt);
+});
+
+test("getSupersedableProposalsForPath: returns unresolved same-file proposals only", () => {
+  const targetPath = "/tmp/example.ts";
+  const deps = {
+    proposals: () => [
+      makeProposal({ id: "pending", resolvedPath: targetPath, status: "pending" }),
+      makeProposal({ id: "approved", resolvedPath: targetPath, status: "approved" }),
+      makeProposal({ id: "deferred", resolvedPath: targetPath, status: "deferred" }),
+      makeProposal({ id: "applied", resolvedPath: targetPath, status: "applied" }),
+      makeProposal({ id: "other-file", resolvedPath: "/tmp/other.ts", status: "pending" }),
+    ],
+    setProposals: () => {},
+    persist: () => {},
+    updateStatus: () => {},
+  };
+  const result = getSupersedableProposalsForPath(deps, targetPath, "approved");
+  assert.deepStrictEqual(result.map((proposal) => proposal.id), ["pending", "deferred"]);
+});
+
+test("supersedeProposalsForPath: marks old same-file proposals superseded", () => {
+  const targetPath = "/tmp/example.ts";
+  let current = [
+    makeProposal({ id: "old-pending", resolvedPath: targetPath, status: "pending" }),
+    makeProposal({ id: "old-approved", resolvedPath: targetPath, status: "approved" }),
+    makeProposal({ id: "new-change", resolvedPath: targetPath, status: "pending" }),
+    makeProposal({ id: "other-file", resolvedPath: "/tmp/other.ts", status: "pending" }),
+  ];
+  const deps = {
+    proposals: () => current,
+    setProposals: (updated: PendingProposal[]) => { current = updated; },
+    persist: () => {},
+    updateStatus: () => {},
+  };
+  const matched = supersedeProposalsForPath(deps, targetPath, "new-change");
+  assert.deepStrictEqual(matched.map((proposal) => proposal.id), ["old-pending", "old-approved"]);
+  const superseded = current.filter((proposal) => proposal.status === "superseded");
+  assert.deepStrictEqual(superseded.map((proposal) => proposal.id), ["old-pending", "old-approved"]);
+  assert.ok(superseded.every((proposal) => proposal.supersededById === "new-change"));
+  assert.strictEqual(current.find((proposal) => proposal.id === "new-change")?.status, "pending");
 });
 
 // ─── Report ─────────────────────────────────────────────────────────────────────

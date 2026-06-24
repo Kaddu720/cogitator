@@ -58,6 +58,8 @@ import {
   deferSelectedProposals,
   deferPendingProposals,
   beginApplyingProposalForPath,
+  getSupersedableProposalsForPath,
+  supersedeProposalsForPath,
 } from "./approvals/actions.js";
 import {
   JIRA_TMP_PREFIX,
@@ -216,6 +218,37 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
   function setPendingProposals(updated: PendingProposal[]): void {
     state.pendingProposals = updated;
     state.approvalSummary = buildApprovalSummary(updated);
+  }
+
+  async function reconcileSameFileProposalConflicts(ctx: ExtensionContext, proposals: PendingProposal[]): Promise<PendingProposal[]> {
+    if (!ctx.hasUI || proposals.length === 0) return proposals;
+    let reconciled = proposals;
+    for (const proposal of proposals) {
+      const existing = getSupersedableProposalsForPath(approvalDeps, proposal.resolvedPath, proposal.id);
+      if (existing.length === 0) continue;
+      const choice = await ctx.ui.select(
+        `This file already has unresolved proposals: ${proposal.displayFile}. How should the new proposal be handled?`,
+        [
+          "Supersede old proposal(s) and keep new pending",
+          "Supersede old proposal(s) and approve new",
+          "Keep both proposals",
+          "Cancel new proposal",
+        ],
+      );
+      if (!choice || choice === "Cancel new proposal") {
+        reconciled = reconciled.filter((candidate) => candidate.id !== proposal.id);
+        continue;
+      }
+      if (choice.startsWith("Supersede old proposal(s)")) {
+        supersedeProposalsForPath(approvalDeps, proposal.resolvedPath, proposal.id);
+        if (choice === "Supersede old proposal(s) and approve new") {
+          reconciled = reconciled.map((candidate) =>
+            candidate.id === proposal.id ? { ...candidate, status: "approved" as const } : candidate,
+          );
+        }
+      }
+    }
+    return reconciled;
   }
 
   const state: WorkflowRuntimeState = {
@@ -885,8 +918,12 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         let stateChanged = completedCount > 0;
         if (completedCount > 0 && ctx.hasUI) ctx.ui.notify(`Marked ${completedCount} approved or applying proposal(s) complete.`, "success");
         if (proposals.length > 0) {
-          setPendingProposals(mergePendingProposals(ps(), proposals.map((p) => ({ ...p, status: "pending" as const }))));
-          state.approvalPromptDeferred = false; stateChanged = true;
+          let nextProposals = proposals.map((p) => ({ ...p, status: "pending" as const }));
+          nextProposals = await reconcileSameFileProposalConflicts(ctx, nextProposals);
+          if (nextProposals.length > 0) {
+            setPendingProposals(mergePendingProposals(ps(), nextProposals));
+            state.approvalPromptDeferred = false; stateChanged = true;
+          }
         }
         if (stateChanged) { persistApprovalState(); updateStatus(ctx); }
         const actionableCount = state.approvalSummary.actionable;
