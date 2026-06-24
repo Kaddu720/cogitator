@@ -52,6 +52,13 @@ import {
   getModeTools,
 } from "../resources.js";
 
+import {
+  buildPromptInjectionSignature,
+  shouldInjectPromptFragments,
+  buildApprovalSummary,
+  emptyApprovalSummary,
+} from "../workflow-mode.js";
+
 import type { PendingProposal } from "../approvals/types.js";
 
 // ─── Test runner ────────────────────────────────────────────────────────────────
@@ -558,6 +565,145 @@ test("getModeTools: normal returns all tools", () => {
   const all = ["read", "bash", "edit", "write", "grep", "find", "ls"];
   const filtered = getModeTools(all, "normal");
   assert.deepStrictEqual(filtered, all);
+});
+
+test("buildPromptInjectionSignature: stays stable for unchanged inputs", () => {
+  const a = buildPromptInjectionSignature({
+    mode: "plan",
+    modePromptPath: "/tmp/mode-plan.md",
+    projectId: "example-project",
+    projectScopeOnly: true,
+    workspaceContextPath: "/tmp/workspace-context.md",
+  });
+  const b = buildPromptInjectionSignature({
+    mode: "plan",
+    modePromptPath: "/tmp/mode-plan.md",
+    projectId: "example-project",
+    projectScopeOnly: true,
+    workspaceContextPath: "/tmp/workspace-context.md",
+  });
+  assert.strictEqual(a, b);
+  assert.strictEqual(shouldInjectPromptFragments(a, b), false);
+});
+
+test("buildPromptInjectionSignature: changes when mode or project changes", () => {
+  const base = buildPromptInjectionSignature({
+    mode: "plan",
+    modePromptPath: "/tmp/mode-plan.md",
+    projectId: "example-project",
+    projectScopeOnly: true,
+    workspaceContextPath: "/tmp/workspace-context.md",
+  });
+  const changedMode = buildPromptInjectionSignature({
+    mode: "normal",
+    modePromptPath: "/tmp/mode-normal.md",
+    projectId: "example-project",
+    projectScopeOnly: false,
+    workspaceContextPath: "/tmp/workspace-context.md",
+  });
+  const changedProject = buildPromptInjectionSignature({
+    mode: "plan",
+    modePromptPath: "/tmp/mode-plan.md",
+    projectId: "other-project",
+    projectScopeOnly: true,
+    workspaceContextPath: "/tmp/workspace-context.md",
+  });
+  assert.notStrictEqual(base, changedMode);
+  assert.notStrictEqual(base, changedProject);
+  assert.strictEqual(shouldInjectPromptFragments(base, changedMode), true);
+  assert.strictEqual(shouldInjectPromptFragments(base, changedProject), true);
+});
+
+test("buildPromptInjectionSignature: changes when workspace context availability changes", () => {
+  const withContext = buildPromptInjectionSignature({
+    mode: "plan",
+    modePromptPath: "/tmp/mode-plan.md",
+    projectId: "example-project",
+    projectScopeOnly: true,
+    workspaceContextPath: "/tmp/workspace-context.md",
+  });
+  const withoutContext = buildPromptInjectionSignature({
+    mode: "plan",
+    modePromptPath: "/tmp/mode-plan.md",
+    projectId: "example-project",
+    projectScopeOnly: true,
+    workspaceContextPath: null,
+  });
+  assert.notStrictEqual(withContext, withoutContext);
+  assert.strictEqual(shouldInjectPromptFragments(withContext, withoutContext), true);
+});
+
+test("emptyApprovalSummary: returns zeroed compact state", () => {
+  assert.deepStrictEqual(emptyApprovalSummary(), {
+    total: 0,
+    actionable: 0,
+    pending: 0,
+    approved: 0,
+    deferred: 0,
+    needsRevision: 0,
+    rejected: 0,
+    items: [],
+  });
+});
+
+test("buildApprovalSummary: builds compact counts and labels", () => {
+  const proposals = [
+    makeProposal({
+      id: "change-1",
+      index: 1,
+      total: 2,
+      file: "a.ts",
+      proposedEdit: "Edit A",
+      status: "pending",
+    }),
+    makeProposal({
+      id: "change-2",
+      index: 2,
+      total: 2,
+      file: "b.ts",
+      proposedEdit: "Edit B",
+      status: "approved",
+    }),
+    makeProposal({
+      id: "change-3",
+      index: 3,
+      total: 3,
+      file: "c.ts",
+      proposedEdit: "Edit C",
+      status: "deferred",
+    }),
+    makeProposal({
+      id: "change-4",
+      index: 4,
+      total: 4,
+      file: "d.ts",
+      proposedEdit: "Edit D",
+      status: "needs-revision",
+    }),
+    makeProposal({
+      id: "change-5",
+      index: 5,
+      total: 5,
+      file: "e.ts",
+      proposedEdit: "Edit E",
+      status: "rejected",
+    }),
+  ];
+  const summary = buildApprovalSummary(proposals);
+  assert.strictEqual(summary.total, 5);
+  assert.strictEqual(summary.actionable, 1);
+  assert.strictEqual(summary.pending, 1);
+  assert.strictEqual(summary.approved, 1);
+  assert.strictEqual(summary.deferred, 1);
+  assert.strictEqual(summary.needsRevision, 1);
+  assert.strictEqual(summary.rejected, 1);
+  assert.deepStrictEqual(summary.items.map((item) => item.label), [
+    "Change 1/2: a.ts — Edit A",
+    "Change 2/2: b.ts — Edit B",
+    "Change 3/3: c.ts — Edit C",
+    "Change 4/4: d.ts — Edit D",
+    "Change 5/5: e.ts — Edit E",
+  ]);
 });
 
 // ─── Report ─────────────────────────────────────────────────────────────────────

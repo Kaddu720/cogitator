@@ -117,6 +117,20 @@ function formatErrorDetails(error: unknown): string {
   return String(error);
 }
 
+export function buildPromptInjectionSignature(input: {
+  mode: Mode;
+  modePromptPath: string;
+  projectId: string | null;
+  projectScopeOnly: boolean;
+  workspaceContextPath: string | null;
+}): string {
+  return JSON.stringify(input);
+}
+
+export function shouldInjectPromptFragments(lastSignature: string | undefined, nextSignature: string): boolean {
+  return lastSignature !== nextSignature;
+}
+
 // ─── Runtime state ──────────────────────────────────────────────────────────────
 
 interface ReadLedgerEntry {
@@ -128,17 +142,70 @@ interface ReadLedgerEntry {
   contiguousWindowedLines?: number;
 }
 
+export interface ApprovalSummaryItem {
+  id: string;
+  label: string;
+  status: ProposalStatus;
+  workflow: string;
+}
+
+export interface ApprovalSummaryState {
+  total: number;
+  actionable: number;
+  pending: number;
+  approved: number;
+  deferred: number;
+  needsRevision: number;
+  rejected: number;
+  items: ApprovalSummaryItem[];
+}
+
+export function emptyApprovalSummary(): ApprovalSummaryState {
+  return {
+    total: 0,
+    actionable: 0,
+    pending: 0,
+    approved: 0,
+    deferred: 0,
+    needsRevision: 0,
+    rejected: 0,
+    items: [],
+  };
+}
+
+export function buildApprovalSummary(proposals: PendingProposal[]): ApprovalSummaryState {
+  const summary = emptyApprovalSummary();
+  summary.total = proposals.length;
+  for (const proposal of proposals) {
+    if (proposal.status === "pending" && isProposalActionable(proposals, proposal)) summary.actionable += 1;
+    if (proposal.status === "pending") summary.pending += 1;
+    else if (proposal.status === "approved") summary.approved += 1;
+    else if (proposal.status === "deferred") summary.deferred += 1;
+    else if (proposal.status === "needs-revision") summary.needsRevision += 1;
+    else if (proposal.status === "rejected") summary.rejected += 1;
+    summary.items.push({
+      id: proposal.id,
+      label: `Change ${proposal.index}/${proposal.total}: ${proposal.file} — ${proposal.proposedEdit}`,
+      status: proposal.status,
+      workflow: describeProposalWorkflowState(proposal, proposals),
+    });
+  }
+  return summary;
+}
+
 interface WorkflowRuntimeState {
   currentMode: Mode;
   activeProject: ProjectRecord | null;
   activeRepoRoot?: string;
   canonicalCheckoutPath?: string;
   pendingProposals: PendingProposal[];
+  approvalSummary: ApprovalSummaryState;
   approvalPromptInFlight: boolean;
   approvalPromptDeferred: boolean;
   approvalResumePending: boolean;
   proposalOnlyRequested: boolean;
   readLedger: Map<string, ReadLedgerEntry>;
+  lastInjectedPromptSignature?: string;
 }
 
 // ─── Extension entry point ──────────────────────────────────────────────────────
@@ -146,17 +213,24 @@ interface WorkflowRuntimeState {
 export default function workflowModeExtension(pi: ExtensionAPI): void {
   const planResearchTools = ["web_search", "fetch_content", "get_search_content", "code_search"];
   let baseTools: string[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+  function setPendingProposals(updated: PendingProposal[]): void {
+    state.pendingProposals = updated;
+    state.approvalSummary = buildApprovalSummary(updated);
+  }
+
   const state: WorkflowRuntimeState = {
     currentMode: "plan",
     activeProject: null,
     activeRepoRoot: undefined,
     canonicalCheckoutPath: undefined,
     pendingProposals: [],
+    approvalSummary: emptyApprovalSummary(),
     approvalPromptInFlight: false,
     approvalPromptDeferred: false,
     approvalResumePending: false,
     proposalOnlyRequested: false,
     readLedger: new Map(),
+    lastInjectedPromptSignature: undefined,
   };
 
   // ─── Proposal state accessors ─────────────────────────────────────────────────
@@ -265,9 +339,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     if (!ctx.hasUI) return;
     let text = projectStatusLine(state.activeProject, state.currentMode);
     // Inline actionable count to avoid circular dependency with approvalDeps
-    const awaitingApproval = state.pendingProposals.filter(
-      (p) => p.status === "pending" && isProposalActionable(state.pendingProposals, p),
-    ).length;
+    const awaitingApproval = state.approvalSummary.actionable;
     if (awaitingApproval > 0) text += ` · awaiting approval ${awaitingApproval}`;
     const { themeColor } = getModeDescriptor(state.currentMode);
     const colored = ctx.ui.theme.fg(themeColor, text);
@@ -406,7 +478,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
 
   const approvalDeps: ApprovalActionDeps = {
     proposals: ps,
-    setProposals: (updated) => { state.pendingProposals = updated; },
+    setProposals: setPendingProposals,
     persist: persistApprovalState,
     updateStatus,
   };
@@ -544,8 +616,12 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         if (state.workingMemory.focus.length > 0) lines.push(`Memory focus: ${state.workingMemory.focus.join(" | ")}`);
         if (state.workingMemory.nextSteps.length > 0) lines.push(`Memory next: ${state.workingMemory.nextSteps.join(" | ")}`);
       }
-      const needingApproval = getPendingApprovalProposals(approvalDeps);
-      if (needingApproval.length > 0) { lines.push(`Pending approvals: ${needingApproval.length}`); for (const p of needingApproval) lines.push(`- Change ${p.index}/${p.total}: ${p.file} — ${p.proposedEdit} [${p.status}]`); }
+      if (state.approvalSummary.actionable > 0) {
+        lines.push(`Pending approvals: ${state.approvalSummary.actionable}`);
+        for (const item of state.approvalSummary.items.filter((item) => item.status === "pending").slice(0, 5)) {
+          lines.push(`- ${item.label} [${item.status}]`);
+        }
+      }
       if (ctx.hasUI) ctx.ui.notify(lines.join("\n"), "info");
     },
 
@@ -598,7 +674,10 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
 
     "approval-status": async (_args, ctx) => {
       if (ps().length === 0) { if (ctx.hasUI) ctx.ui.notify("No change proposals recorded for this session.", "info"); return; }
-      const lines = ["Change proposals:"];
+      const lines = [
+        "Change proposals:",
+        `Summary: total=${state.approvalSummary.total}, actionable=${state.approvalSummary.actionable}, pending=${state.approvalSummary.pending}, approved=${state.approvalSummary.approved}, deferred=${state.approvalSummary.deferred}, needs-revision=${state.approvalSummary.needsRevision}, rejected=${state.approvalSummary.rejected}`,
+      ];
       for (const p of ps()) {
         lines.push(formatProposalSummary(p));
         lines.push(`  id: ${p.id}`, `  status: ${p.status}`, `  workflow: ${describeProposalWorkflowState(p, ps())}`);
@@ -649,10 +728,10 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       state.canonicalCheckoutPath = ctx.cwd;
       const restoredMode = restoreMode(ctx);
       state.currentMode = getRestoredStartupMode(restoredMode);
-      state.pendingProposals = restoreNormalizedProposals(ctx, ctx.cwd, {
+      setPendingProposals(restoreNormalizedProposals(ctx, ctx.cwd, {
         repoRoot: state.activeRepoRoot,
         canonicalCheckoutPath: state.canonicalCheckoutPath,
-      });
+      }));
       const preferredProjectId = restoreStoredProjectId(ctx) ?? process.env.COGITATOR_PROJECT_ID;
       if (typeof preferredProjectId === "string") {
         const projects = await loadProjects();
@@ -687,10 +766,10 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       state.canonicalCheckoutPath = ctx.cwd;
       const restoredMode = restoreMode(ctx);
       state.currentMode = getRestoredTreeMode(restoredMode);
-      state.pendingProposals = restoreNormalizedProposals(ctx, ctx.cwd, {
+      setPendingProposals(restoreNormalizedProposals(ctx, ctx.cwd, {
         repoRoot: state.activeRepoRoot,
         canonicalCheckoutPath: state.canonicalCheckoutPath,
-      });
+      }));
       const restoredProjectId = restoreStoredProjectId(ctx);
       if (restoredProjectId === null) { state.activeProject = null; state.workingMemory = null; }
       else if (typeof restoredProjectId === "string") {
@@ -763,16 +842,34 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     },
 
     before_agent_start: async (event) => {
-      const additions: string[] = [await readPromptFragment(CHANGE_PROPOSAL_WORKFLOW_PROMPT_PATH), await readPromptFragment(SECRET_SAFETY_PROMPT_PATH), await readPromptFragment(TARGETED_FILE_ACCESS_PROMPT_PATH), await readPromptFragment(COMPUTE_IN_VM_PROMPT_PATH)];
       const workspaceContextPath = getWorkspaceContextPath();
-      if (workspaceContextPath && await fileExists(workspaceContextPath)) { additions.push(await readPromptFragment(workspaceContextPath)); }
+      const workspaceContextExists = !!(workspaceContextPath && await fileExists(workspaceContextPath));
       const modeDescriptor = getModeDescriptor(state.currentMode);
-      additions.push(await readPromptFragment(modeDescriptor.promptPath));
-      if (modeDescriptor.writePolicy.projectScopeOnly && state.activeProject) {
-        additions.push(`Active project write scope: state file ${getProjectStatePath(state.activeProject)}; artifacts directory ${getProjectArtifactsPath(state.activeProject)}; Jira closeout drafts ${JIRA_TMP_PREFIX}<ISSUE-KEY>.txt.`);
+      const promptSignature = buildPromptInjectionSignature({
+        mode: state.currentMode,
+        modePromptPath: modeDescriptor.promptPath,
+        projectId: state.activeProject?.id ?? null,
+        projectScopeOnly: modeDescriptor.writePolicy.projectScopeOnly,
+        workspaceContextPath: workspaceContextExists ? workspaceContextPath : null,
+      });
+      const shouldInjectPrompt = shouldInjectPromptFragments(state.lastInjectedPromptSignature, promptSignature);
+      const additions: string[] = [];
+      if (shouldInjectPrompt) {
+        additions.push(
+          await readPromptFragment(CHANGE_PROPOSAL_WORKFLOW_PROMPT_PATH),
+          await readPromptFragment(SECRET_SAFETY_PROMPT_PATH),
+          await readPromptFragment(TARGETED_FILE_ACCESS_PROMPT_PATH),
+          await readPromptFragment(COMPUTE_IN_VM_PROMPT_PATH),
+        );
+        if (workspaceContextExists && workspaceContextPath) additions.push(await readPromptFragment(workspaceContextPath));
+        additions.push(await readPromptFragment(modeDescriptor.promptPath));
+        if (modeDescriptor.writePolicy.projectScopeOnly && state.activeProject) {
+          additions.push(`Active project write scope: state file ${getProjectStatePath(state.activeProject)}; artifacts directory ${getProjectArtifactsPath(state.activeProject)}; Jira closeout drafts ${JIRA_TMP_PREFIX}<ISSUE-KEY>.txt.`);
+        }
+        if (state.activeProject) additions.push(await readPromptFragment(PROJECT_CONTEXT_GUIDANCE_PROMPT_PATH));
+        state.lastInjectedPromptSignature = promptSignature;
       }
       if (!state.activeProject) { if (additions.length === 0) return; return { systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}` }; }
-      additions.push(await readPromptFragment(PROJECT_CONTEXT_GUIDANCE_PROMPT_PATH));
       const message = { customType: "cogitator-project-context", content: await buildProjectContext(state.activeProject, event.cwd, state.canonicalCheckoutPath ?? state.activeRepoRoot, state.currentMode), display: false };
       if (additions.length === 0) return { message };
       return { message, systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}` };
@@ -783,16 +880,16 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         const assistantText = extractAssistantText(event.messages as unknown[]);
         const markResult = markCompletedProposals(ps(), assistantText);
         const completedCount = markResult.count;
-        if (completedCount > 0) { state.pendingProposals = markResult.proposals; }
+        if (completedCount > 0) { setPendingProposals(markResult.proposals); }
         const proposals = extractPendingProposals(assistantText, ctx.cwd, state.canonicalCheckoutPath ?? state.activeRepoRoot);
         let stateChanged = completedCount > 0;
         if (completedCount > 0 && ctx.hasUI) ctx.ui.notify(`Marked ${completedCount} approved or applying proposal(s) complete.`, "success");
         if (proposals.length > 0) {
-          state.pendingProposals = mergePendingProposals(ps(), proposals.map((p) => ({ ...p, status: "pending" as const })));
+          setPendingProposals(mergePendingProposals(ps(), proposals.map((p) => ({ ...p, status: "pending" as const }))));
           state.approvalPromptDeferred = false; stateChanged = true;
         }
         if (stateChanged) { persistApprovalState(); updateStatus(ctx); }
-        const actionableCount = getPendingApprovalProposals(approvalDeps).length;
+        const actionableCount = state.approvalSummary.actionable;
         if (proposals.length > 0 && ctx.hasUI) {
           const actionableMessage = actionableCount > 0 ? `${actionableCount} actionable step(s) can be reviewed now.` : "No step is actionable yet; complete earlier approved steps first.";
           ctx.ui.notify(`Captured ${proposals.length} proposed change(s). ${actionableMessage}`, "info");
