@@ -182,6 +182,10 @@ const DESTRUCTIVE_PATTERNS = [
   /\breboot\b/i, /\bshutdown\b/i,
   /\bsystemctl\s+(start|stop|restart|enable|disable)/i,
   /\bservice\s+\S+\s+(start|stop|restart)/i, /\b(vim?|nano|emacs|code|subl)\b/i,
+  /\bkubectl\s+(apply|create|delete|edit|patch|replace|scale|annotate|label|set|rollout\s+restart|cordon|uncordon|drain|taint)\b/i,
+  /\bhelm\s+(install|upgrade|rollback|uninstall)\b/i,
+  /\bterraform\s+(apply|destroy|import|taint|untaint|force-unlock)\b/i,
+  /\bterraform\s+state\s+(rm|mv|replace-provider|push|pull)\b/i,
 ];
 
 const SAFE_PATTERNS = [
@@ -197,6 +201,9 @@ const SAFE_PATTERNS = [
   /^\s*yarn\s+(list|info|why|audit)/i, /^\s*node\s+--version/i, /^\s*python\s+--version/i,
   /^\s*curl\s/i, /^\s*wget\s+-O\s*-/i, /^\s*jq\b/, /^\s*sed\s+-n/i, /^\s*awk\b/,
   /^\s*rg\b/, /^\s*fd\b/, /^\s*bat\b/, /^\s*exa\b/,
+  /^\s*kubectl\s+(get|describe|logs|top|api-resources|api-versions|cluster-info|version|config\s+(current-context|get-contexts|view)|auth\s+can-i)\b/i,
+  /^\s*helm\s+(list|status|get\s+(values|manifest|notes|hooks|metadata)|history|show\s+(values|chart|readme|crds|all)|template|search\b|repo\s+(list|update))\b/i,
+  /^\s*terraform\s+(show|output|providers|version|state\s+(list|show)|workspace\s+show)\b/i,
 ];
 
 /**
@@ -205,6 +212,15 @@ const SAFE_PATTERNS = [
  * A command is safe only if it matches no destructive pattern AND matches at
  * least one safe pattern. Unknown commands (matching neither list) are blocked.
  */
+export function isBlockedInfraMutationCommand(command: string): boolean {
+  return [
+    /\bkubectl\s+(apply|create|delete|edit|patch|replace|scale|annotate|label|set|rollout\s+restart|cordon|uncordon|drain|taint)\b/i,
+    /\bhelm\s+(install|upgrade|rollback|uninstall)\b/i,
+    /\bterraform\s+(apply|destroy|import|taint|untaint|force-unlock)\b/i,
+    /\bterraform\s+state\s+(rm|mv|replace-provider|push|pull)\b/i,
+  ].some((p) => p.test(command));
+}
+
 export function isSafeCommand(command: string): boolean {
   const destructive = DESTRUCTIVE_PATTERNS.some((p) => p.test(command));
   const safe = SAFE_PATTERNS.some((p) => p.test(command));

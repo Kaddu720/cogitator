@@ -54,9 +54,12 @@ interface ModeWritePolicy {
 
 ## Tool allowlists
 
-- **Plan:** `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` (bash restricted to safe commands)
+- **Plan:** `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` (bash restricted to safe read-only commands, including read-only `kubectl`, `helm`, and `terraform` inspection)
 - **Normal/Creative:** All tools (no allowlist filter)
 - **Readonly:** `read`, `grep`, `find`, `ls`
+
+Plan-mode bash safety explicitly allows read-only infrastructure inspection commands such as `kubectl get`, `kubectl describe`, `kubectl logs`, `helm list`, `helm status`, `helm get ...`, `terraform show`, and `terraform state list/show`.
+Mutating infrastructure commands remain blocked at the harness level, including `kubectl apply/create/delete/edit/patch/replace`, `helm install/upgrade/rollback/uninstall`, and `terraform apply/destroy/import` plus state-changing `terraform state` operations.
 
 ## Prompt fragments
 

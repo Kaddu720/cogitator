@@ -43,6 +43,7 @@ import {
 } from "../project-state.js";
 
 import {
+  isBlockedInfraMutationCommand,
   isSafeCommand,
   formatMode,
   getModeDescriptor,
@@ -405,6 +406,30 @@ test("isSafeCommand: allows git status", () => {
 
 test("isSafeCommand: blocks unknown commands", () => {
   assert.ok(!isSafeCommand("someRandomCommand --flag"));
+});
+
+test("isBlockedInfraMutationCommand: blocks kubectl apply", () => {
+  assert.ok(isBlockedInfraMutationCommand("kubectl apply -f deployment.yaml"));
+});
+
+test("isBlockedInfraMutationCommand: blocks helm upgrade", () => {
+  assert.ok(isBlockedInfraMutationCommand("helm upgrade my-release ./chart"));
+});
+
+test("isBlockedInfraMutationCommand: blocks terraform apply", () => {
+  assert.ok(isBlockedInfraMutationCommand("terraform apply -auto-approve"));
+});
+
+test("isBlockedInfraMutationCommand: allows kubectl get", () => {
+  assert.ok(!isBlockedInfraMutationCommand("kubectl get pods -A"));
+});
+
+test("isBlockedInfraMutationCommand: allows helm status", () => {
+  assert.ok(!isBlockedInfraMutationCommand("helm status my-release"));
+});
+
+test("isBlockedInfraMutationCommand: allows terraform state list", () => {
+  assert.ok(!isBlockedInfraMutationCommand("terraform state list"));
 });
 
 test("formatMode: returns emoji + label", () => {

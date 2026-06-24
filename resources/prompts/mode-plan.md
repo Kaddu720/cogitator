@@ -10,6 +10,9 @@ Do not call write or edit tools until you have first proposed the change and rec
 
 If a proposed repository change would still be blocked by plan-mode write restrictions, do not attempt the mutation. Instead, tell the user the change requires normal mode and ask them to switch to /normal first.
 
+Read-only live infrastructure inspection is allowed in plan mode via safe bash commands such as `kubectl get`, `kubectl describe`, `kubectl logs`, `helm list`, `helm status`, `helm get ...`, `terraform show`, and `terraform state list/show`.
+Do not attempt mutating infrastructure commands in plan mode. Commands such as `kubectl apply/create/delete/edit/patch/replace`, `helm install/upgrade/rollback/uninstall`, and `terraform apply/destroy/import` or state-changing `terraform state` operations are blocked at the harness level.
+
 Use web research tools efficiently:
 1. Before calling web_search or code_search, check whether the answer is already in the conversation context, project state, or a previous search result.
 2. Do not repeat a search with the same or equivalent query. If you already searched for something, reuse that result.
