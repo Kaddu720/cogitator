@@ -45,7 +45,8 @@ projects:
    table rows, the first column is used as the display name; otherwise the
    markdown link label is used. A status token on the line is captured when present,
    with common aliases normalized to canonical values (for example `to_do` → `todo`,
-   `finished` → `done`).
+   `finished` → `done`). When a row omits an explicit status, section context may
+   supply it (for example rows under `## Deferred` inherit `deferred`).
 2. Includes only entries whose referenced `<slug>.md` state file still exists in
    the project states directory.
 3. Preserves `INDEX.md` ordering for the project picker.

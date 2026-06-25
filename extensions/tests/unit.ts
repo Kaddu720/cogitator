@@ -950,16 +950,23 @@ test("loadProjects: returns only indexed existing files in index order", async (
       "| Alpha Project | [alpha.md](alpha.md) | finished |",
       "| Missing Project | [missing.md](missing.md) | to_do |",
       "",
+      "## Deferred (Jira: On Hold)",
+      "",
+      "| Project | File | Last Date |",
+      "|---|---|---|",
+      "| Deferred Project | [deferred.md](deferred.md) | 2026-06-20 |",
+      "",
     ].join("\n"));
     writeFileSync(join(root, "alpha.md"), "# Alpha Project\n\nStatus: **in_progress**\n");
     writeFileSync(join(root, "bravo.md"), "# Bravo Project\n\nStatus: **todo**\n");
     writeFileSync(join(root, "orphan.md"), "# Orphan Project\n\nStatus: **in_progress**\n");
+    writeFileSync(join(root, "deferred.md"), "# Deferred Project\n\nStatus: **deferred**\n");
     process.env.COGITATOR_PROJECT_STATES_DIR = root;
 
     const projects = await loadProjects();
-    assert.deepStrictEqual(projects.map((project) => project.id), ["bravo", "alpha"]);
-    assert.deepStrictEqual(projects.map((project) => project.name), ["Bravo Project", "Alpha Project"]);
-    assert.deepStrictEqual(projects.map((project) => project.status), ["todo", "done"]);
+    assert.deepStrictEqual(projects.map((project) => project.id), ["bravo", "alpha", "deferred"]);
+    assert.deepStrictEqual(projects.map((project) => project.name), ["Bravo Project", "Alpha Project", "Deferred Project"]);
+    assert.deepStrictEqual(projects.map((project) => project.status), ["todo", "done", "deferred"]);
     assert.ok(projects.every((project) => project.statePath === join(root, `${project.id}.md`)));
   } finally {
     if (previous === undefined) delete process.env.COGITATOR_PROJECT_STATES_DIR;

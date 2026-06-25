@@ -206,14 +206,24 @@ function parseIndex(indexText: string): IndexEntry[] {
   const entries: IndexEntry[] = [];
   const seen = new Set<string>();
   let order = 0;
+  let sectionStatus: string | undefined;
   for (const line of indexText.split(/\r?\n/)) {
+    const heading = line.match(/^##\s+(.+?)\s*$/);
+    if (heading) {
+      const title = heading[1].toLowerCase();
+      if (title.includes("deferred")) sectionStatus = "deferred";
+      else if (title.includes("standalone active")) sectionStatus = "in_progress";
+      else sectionStatus = undefined;
+      continue;
+    }
+
     const link = line.match(/\[([^\]]+)\]\(([^)]+\.md)\)/);
     if (!link) continue;
     const id = projectIdFromFilename(link[2]);
     if (NON_PROJECT_FILES.has(`${id}.md`.toLowerCase())) continue;
     if (seen.has(id)) continue;
     const rawStatusMatch = line.match(/\b(in_progress|todo|blocked|done|deferred|to_do|finished)\b/i);
-    const statusToken = normalizeStatusToken(rawStatusMatch?.[1]);
+    const statusToken = normalizeStatusToken(rawStatusMatch?.[1]) ?? sectionStatus;
     const tableMatch = line.match(/^\|\s*([^|]+?)\s*\|\s*\[[^\]]+\]\([^)]+\.md\)\s*\|/);
     const displayName = tableMatch?.[1]?.trim() || link[1].trim();
     entries.push({ id, name: displayName, status: statusToken, order: order++ });
