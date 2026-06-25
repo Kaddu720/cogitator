@@ -66,6 +66,13 @@ prompts, then scaffolds `<slug>.md` directly from the house format, adds an
 immediately. The command uses a narrow bootstrap write path so it still works
 before any project is active.
 
+In `/plan` mode, cogitator may edit any state file under `projectStates/*.md`.
+Artifact writes remain scoped to the active project's `artifacts/<slug>/` directory.
+
+`/approval-status` is also a resume point for the approval workflow: when there are
+pending or already-approved proposals, it can reopen the interactive approval menu
+instead of only printing a text summary.
+
 ## Shutdown checkpoint persistence (artifacts-only)
 
 On session shutdown, `writeProjectShutdownCheckpoint()` in `project-state.ts`:

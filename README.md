@@ -116,14 +116,14 @@ repo links.)
 ### `/plan`
 - allows analysis/planning behavior
 - allows only safe read-only `bash`
-- allows `write`/`edit` only for the active project's:
-  - state file (`<slug>.md`)
+- allows `write`/`edit` for any project state file under `projectStates/*.md`
+- allows `write`/`edit` for the active project's artifact directory:
   - `artifacts/<slug>/**`
-- supports planning artifacts in that project artifact directory, such as daily plans or session plans under `~/Projects/projectStates/artifacts/<slug>/`
+- supports planning artifacts in that active project artifact directory, such as daily plans or session plans under `~/Projects/projectStates/artifacts/<slug>/`
 - also allows Jira closeout drafts under:
   - `/tmp/jira-closeout-<ISSUE-KEY>.txt`
 
-This lets you keep project tracking and planning artifacts up to date during planning without permitting repo/code edits.
+This lets you keep project tracking up to date across related state files during planning without permitting repo/code edits.
 
 ## Transactional approval gate
 
@@ -145,7 +145,8 @@ Proposed edit: <summary>
    - `a` or `approve`
    - `e` or `edit`
    - `r` or `reject`
-5. After approval, only the approved file paths are unlocked for mutation.
+5. You can also use `/approval-status` to reopen the interactive approval menu for pending or already-approved proposals.
+6. After approval, only the approved file paths are unlocked for mutation.
 
 Notes:
 

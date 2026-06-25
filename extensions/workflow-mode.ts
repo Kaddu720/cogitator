@@ -766,13 +766,19 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     "approval-status": async (_args, ctx) => {
       if (state.approvalSummary.total === 0) { if (ctx.hasUI) ctx.ui.notify("No change proposals recorded for this session.", "info"); return; }
       hydratedPs(ctx);
+      const proposals = ps();
+      const hasMenuCandidates = proposals.some((proposal) => proposal.status === "pending" || proposal.status === "approved");
+      if (ctx.hasUI && hasMenuCandidates) {
+        await promptForApproval(ctx);
+        return;
+      }
       const lines = [
         "Change proposals:",
         `Summary: total=${state.approvalSummary.total}, actionable=${state.approvalSummary.actionable}, pending=${state.approvalSummary.pending}, approved=${state.approvalSummary.approved}, deferred=${state.approvalSummary.deferred}, needs-revision=${state.approvalSummary.needsRevision}, rejected=${state.approvalSummary.rejected}`,
       ];
-      for (const p of ps()) {
+      for (const p of proposals) {
         lines.push(formatProposalSummary(p));
-        lines.push(`  id: ${p.id}`, `  status: ${p.status}`, `  workflow: ${describeProposalWorkflowState(p, ps())}`);
+        lines.push(`  id: ${p.id}`, `  status: ${p.status}`, `  workflow: ${describeProposalWorkflowState(p, proposals)}`);
         lines.push(`  raw path: ${p.rawFile}`, `  normalized path: ${p.normalizedFile}`, `  resolved path: ${p.resolvedPath}`, `  resolution base: ${p.resolutionBase}`);
         if (p.revisionNote) lines.push(`  revision note: ${p.revisionNote}`);
         if (p.deferredNote) lines.push(`  deferred note: ${p.deferredNote}`);
@@ -1200,10 +1206,14 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
             return;
           }
 
+          const projectStatesDir = getProjectStatesDir();
           const statePath = getProjectStatePath(state.activeProject);
           const artifactsPath = getProjectArtifactsPath(state.activeProject);
-          const allowed = resolvedPath === statePath || isSameOrWithin(resolvedPath, artifactsPath) || jiraAllowed;
-          if (!allowed) return { block: true, reason: ["Plan mode only allows file mutations for the active project control files.", `Active project state file: ${statePath}`, `Active project artifacts directory: ${artifactsPath}`, `Allowed Jira draft path pattern: ${JIRA_TMP_PREFIX}<ISSUE-KEY>.txt`, `Requested path: ${resolvedPath}`, "Use /normal to edit repository files."].join("\n") };
+          const anyStateFileAllowed = isSameOrWithin(resolvedPath, projectStatesDir)
+            && resolvedPath.endsWith(".md")
+            && !isSameOrWithin(resolvedPath, resolve(projectStatesDir, "artifacts"));
+          const allowed = anyStateFileAllowed || resolvedPath === statePath || isSameOrWithin(resolvedPath, artifactsPath) || jiraAllowed;
+          if (!allowed) return { block: true, reason: ["Plan mode only allows file mutations for project state files and the active project's control files.", `Project states directory: ${projectStatesDir}`, `Active project state file: ${statePath}`, `Active project artifacts directory: ${artifactsPath}`, `Allowed Jira draft path pattern: ${JIRA_TMP_PREFIX}<ISSUE-KEY>.txt`, `Requested path: ${resolvedPath}`, "Use /normal to edit repository files."].join("\n") };
           if (!isApprovalExemptPath(resolvedPath, state.activeProject)) {
             const hydratedApprovalDeps = getHydratedApprovalDeps(ctx);
             const approvedProposal = beginApplyingProposalForPath(hydratedApprovalDeps, resolvedPath, ctx);
