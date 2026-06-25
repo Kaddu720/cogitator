@@ -17,6 +17,8 @@ import {
   getProjectArtifactsPath,
   isApprovalExemptPath,
   loadProjects,
+  createProjectScaffold,
+  registerProjectInIndex,
   buildProjectContext,
 } from "./projects.js";
 import {
@@ -220,6 +222,7 @@ interface WorkflowRuntimeState {
   approvalPromptDeferred: boolean;
   approvalResumePending: boolean;
   proposalOnlyRequested: boolean;
+  pendingBootstrapProjectId?: string;
   readLedger: Map<string, ReadLedgerEntry>;
   lastInjectedPromptSignature?: string;
   lastProjectContextSignature?: string;
@@ -263,8 +266,8 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       const choice = await ctx.ui.select(
         `This file already has unresolved proposals: ${proposal.displayFile}. How should the new proposal be handled?`,
         [
-          "Supersede old proposal(s) and keep new pending",
           "Supersede old proposal(s) and approve new",
+          "Supersede old proposal(s) and keep new pending",
           "Keep both proposals",
           "Cancel new proposal",
         ],
@@ -297,6 +300,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
     approvalPromptDeferred: false,
     approvalResumePending: false,
     proposalOnlyRequested: false,
+    pendingBootstrapProjectId: undefined,
     readLedger: new Map(),
     lastInjectedPromptSignature: undefined,
     lastProjectContextSignature: undefined,
@@ -663,26 +667,33 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       const projectName = (((await ctx.ui.input("New project", "Project title / name")) ?? "").trim()) || seed;
       if (!projectName) { ctx.ui.notify("Project creation cancelled: a project name is required.", "warning"); return; }
       const suggestedSlug = slugifyProjectId(projectName);
+      if (!suggestedSlug) { ctx.ui.notify("Project creation cancelled: could not derive a valid slug from the project name.", "warning"); return; }
+
       const existing = await loadProjects();
-      const slugCollision = existing.some((p) => p.id === suggestedSlug);
+      if (existing.some((p) => p.id === suggestedSlug)) {
+        ctx.ui.notify(`Project creation cancelled: slug already exists (${suggestedSlug}). Pick a distinct project name.`, "warning");
+        return;
+      }
+
       const description = ((await ctx.ui.input("Description", "Short description / scope (optional)")) ?? "").trim();
       const jiraKey = ((await ctx.ui.input("Jira key", "Jira issue key, e.g. SRE-1234 (optional)")) ?? "").trim();
 
-      // Delegate file creation + INDEX.md update to the new-project skill so the
-      // agent follows the project-state conventions (template + INDEX section).
-      const directive = [
-        "Run the new-project skill to scaffold a new project and register it. Inputs:",
-        `- Project name: ${projectName}`,
-        `- Suggested slug: ${suggestedSlug}${slugCollision ? " (a state file with this slug already exists — pick a distinct slug)" : ""}`,
-        `- Description / scope: ${description || "(none provided — infer a brief scope or leave a clear placeholder)"}`,
-        `- Jira key: ${jiraKey || "(none)"}`,
-        `- Project states directory: ${getProjectStatesDir()}`,
-        "Create <project states directory>/<slug>.md from the standard project-state template, add an INDEX.md row under the appropriate section, then report the new slug so it can be loaded with /project.",
-      ].join("\n");
-
-      ctx.ui.notify(`Starting the new-project skill for "${projectName}"…`, "info");
-      if (ctx.isIdle()) pi.sendUserMessage(directive);
-      else pi.sendUserMessage(directive, { deliverAs: "followUp" });
+      state.pendingBootstrapProjectId = suggestedSlug;
+      try {
+        const project = await createProjectScaffold({
+          id: suggestedSlug,
+          name: projectName,
+          description: description || undefined,
+        });
+        await registerProjectInIndex(project);
+        await setActiveProject(project, ctx, false);
+        const jiraSuffix = jiraKey ? ` · Jira ${jiraKey}` : "";
+        ctx.ui.notify(`Created and loaded project: (${project.id}) ${project.name}${jiraSuffix}`, "info");
+      } catch (error) {
+        ctx.ui.notify(`Project creation failed: ${formatErrorDetails(error)}`, "warning");
+      } finally {
+        state.pendingBootstrapProjectId = undefined;
+      }
     },
 
     "project-status": async (_args, ctx) => {
@@ -1173,10 +1184,24 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         // project-scope modes: scope gate + approval gate (plan)
         if (toolDescriptor.writePolicy.projectScopeOnly) {
           if (!isMutationTool) return;
-          if (!state.activeProject) return { block: true, reason: "Plan mode requires an active project before state or artifact files may be edited. Use /project first." };
+          const jiraAllowed = resolvedPath.startsWith(JIRA_TMP_PREFIX) && resolvedPath.endsWith(".txt");
+
+          if (!state.activeProject) {
+            const projectStatesDir = getProjectStatesDir();
+            const indexPath = resolve(projectStatesDir, "INDEX.md");
+            const pendingBootstrapStatePath = state.pendingBootstrapProjectId
+              ? resolve(projectStatesDir, `${state.pendingBootstrapProjectId}.md`)
+              : undefined;
+            const bootstrapAllowed = resolvedPath === indexPath
+              || (pendingBootstrapStatePath !== undefined && resolvedPath === pendingBootstrapStatePath);
+            if (!bootstrapAllowed) {
+              return { block: true, reason: "Plan mode requires an active project before state or artifact files may be edited. Use /project first." };
+            }
+            return;
+          }
+
           const statePath = getProjectStatePath(state.activeProject);
           const artifactsPath = getProjectArtifactsPath(state.activeProject);
-          const jiraAllowed = resolvedPath.startsWith(JIRA_TMP_PREFIX) && resolvedPath.endsWith(".txt");
           const allowed = resolvedPath === statePath || isSameOrWithin(resolvedPath, artifactsPath) || jiraAllowed;
           if (!allowed) return { block: true, reason: ["Plan mode only allows file mutations for the active project control files.", `Active project state file: ${statePath}`, `Active project artifacts directory: ${artifactsPath}`, `Allowed Jira draft path pattern: ${JIRA_TMP_PREFIX}<ISSUE-KEY>.txt`, `Requested path: ${resolvedPath}`, "Use /normal to edit repository files."].join("\n") };
           if (!isApprovalExemptPath(resolvedPath, state.activeProject)) {

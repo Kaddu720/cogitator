@@ -97,9 +97,11 @@ Config/runtime separation:
 - the per-run agent dir (with staged secrets) lives outside the workspace and is not exposed to the Gondolin guest.
 
 You create a new project with `/new-project`: it collects a name (and optional
-description / Jira key), then **kicks off the bundled `new-project` skill**, which
-scaffolds `<slug>.md` from your house format and adds an `INDEX.md` entry. (There is
-no `/add-repo` — the markdown-first model has no structured repo links.)
+description / Jira key), then scaffolds `<slug>.md` directly from the house format,
+registers it in `INDEX.md`, and loads it as the active project. The command uses a
+narrow bootstrap write path for project creation so it still works before any active
+project exists. (There is no `/add-repo` — the markdown-first model has no structured
+repo links.)
 
 ## Modes
 
@@ -446,9 +448,10 @@ That means:
 ## Creating projects
 
 Use `/new-project` from inside a session. It collects a name (and optional
-description / Jira key), then kicks off the bundled `new-project` skill, which
-creates `<project-states-dir>/<slug>.md` in your house format and adds an `INDEX.md`
-entry under the right section. Load it with `/project`.
+description / Jira key), then creates `<project-states-dir>/<slug>.md` in your house
+format, registers an `INDEX.md` entry under the right section, and loads the new
+project automatically. The command uses a narrow bootstrap write path so project
+creation works even when no project is active yet.
 
 > The legacy `cogitator-init-project` CLI predates the markdown-first model and
 > scaffolds the old `project.json` layout (now ignored); don't use it.

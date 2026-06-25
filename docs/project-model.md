@@ -61,10 +61,10 @@ Parsing is tolerant and looks for, when present:
 ## `/new-project`
 
 `/new-project` collects a name (and optional description / Jira key) via quick
-prompts, then **kicks off the `new-project` skill** (a cogitator skill package).
-The skill — not TypeScript scaffolding — creates `<slug>.md` from the house format
-and adds an `INDEX.md` entry under the appropriate section, then reports the slug so
-you can load it with `/project`.
+prompts, then scaffolds `<slug>.md` directly from the house format, adds an
+`INDEX.md` entry under the appropriate section, and loads the new project
+immediately. The command uses a narrow bootstrap write path so it still works
+before any project is active.
 
 ## Shutdown checkpoint persistence (artifacts-only)
 

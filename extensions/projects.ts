@@ -310,7 +310,7 @@ export async function createProjectScaffold(project: NewProjectWizardResult): Pr
   }
 
   await mkdir(dir, { recursive: true });
-  await writeFile(statePath, buildInitialStateMarkdown(project), "utf8");
+  await writeFile(statePath, buildInitialStateMarkdown(project), { encoding: "utf8", flag: "wx" });
 
   return {
     id: project.id,
@@ -319,6 +319,54 @@ export async function createProjectScaffold(project: NewProjectWizardResult): Pr
     artifactsDir: resolve(getArtifactsRoot(), project.id),
     status: "todo",
   };
+}
+
+export async function registerProjectInIndex(project: ProjectRecord, updatedAt = new Date()): Promise<void> {
+  const indexPath = getIndexPath();
+  const date = updatedAt.toISOString().slice(0, 10);
+  const row = `| ${project.name} | [${project.id}.md](${project.id}.md) | ${date} |`;
+  const standaloneHeader = "## Standalone Active (`in_progress`)";
+  const tableHeader = "| Project | File | Last Date |";
+  const separator = "|---|---|---|";
+
+  let indexText = "";
+  try {
+    indexText = await readFile(indexPath, "utf8");
+  } catch {
+    indexText = [
+      "# Project States Index",
+      "",
+      `Last updated: ${date}`,
+      "",
+      "Completed projects live in [ARCHIVE.md](ARCHIVE.md).",
+      "",
+      standaloneHeader,
+      "",
+      tableHeader,
+      separator,
+    ].join("\n");
+  }
+
+  if (indexText.includes(`(${project.id}.md)`)) return;
+
+  const lines = indexText.split(/\r?\n/);
+  const standaloneIndex = lines.findIndex((line) => line.trim() === standaloneHeader);
+  const tableHeaderIndex = standaloneIndex >= 0
+    ? lines.findIndex((line, idx) => idx > standaloneIndex && line.trim() === tableHeader)
+    : -1;
+
+  if (tableHeaderIndex >= 0) {
+    let insertAt = tableHeaderIndex + 1;
+    if (lines[insertAt]?.trim() === separator) insertAt += 1;
+    while (insertAt < lines.length && lines[insertAt].startsWith("|")) insertAt += 1;
+    lines.splice(insertAt, 0, row);
+    indexText = lines.join("\n");
+  } else {
+    const suffix = ["", standaloneHeader, "", tableHeader, separator, row].join("\n");
+    indexText = `${indexText.replace(/\n*$/, "")}\n${suffix}\n`;
+  }
+
+  await writeFile(indexPath, `${indexText.replace(/\n*$/, "")}\n`, "utf8");
 }
 
 // ─── Project context ────────────────────────────────────────────────────────────
