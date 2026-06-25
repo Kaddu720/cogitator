@@ -576,23 +576,27 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
 
   async function promptForApproval(ctx: ExtensionContext): Promise<void> {
     const hydratedApprovalDeps = getHydratedApprovalDeps(ctx);
-    if (!ctx.hasUI || getPendingApprovalProposals(hydratedApprovalDeps).length === 0 || state.approvalPromptInFlight) return;
+    const menuCandidates = () => hydratedPs(ctx).filter((proposal) => proposal.status === "pending" || proposal.status === "approved");
+    if (!ctx.hasUI || menuCandidates().length === 0 || state.approvalPromptInFlight) return;
     state.approvalPromptInFlight = true;
     try {
       const selectProposal = async (title: string): Promise<PendingProposal | undefined> => {
-        const pending = getPendingApprovalProposals(hydratedApprovalDeps);
-        if (pending.length === 0) return undefined;
-        const options = pending.map((p) => formatProposalMenuLabel(p));
+        const candidates = menuCandidates();
+        if (candidates.length === 0) return undefined;
+        const options = candidates.map((p) => formatProposalMenuLabel(p));
         const choice = await ctx.ui.select(title, [...options, "Back"]);
         if (!choice || choice === "Back") return undefined;
         const index = options.indexOf(choice);
-        return index >= 0 ? pending[index] : undefined;
+        return index >= 0 ? candidates[index] : undefined;
       };
-      while (getPendingApprovalProposals(hydratedApprovalDeps).length > 0) {
-        const proposalsNeedingApproval = getPendingApprovalProposals(hydratedApprovalDeps);
-        const proposal = proposalsNeedingApproval.length === 1 ? proposalsNeedingApproval[0] : await selectProposal("Choose a proposed change to review");
+      while (menuCandidates().length > 0) {
+        const candidates = menuCandidates();
+        const proposal = candidates.length === 1 ? candidates[0] : await selectProposal("Choose a proposed change to review");
         if (!proposal) return;
-        const choice = await ctx.ui.select(`Review the proposal in the transcript, then choose an action for ${formatProposalMenuLabel(proposal)}.`, ["Approve", "Revise", "Defer"]);
+        const actions = proposal.status === "approved"
+          ? ["Apply approved change", "Revise", "Defer"]
+          : ["Approve", "Revise", "Defer"];
+        const choice = await ctx.ui.select(`Review the proposal in the transcript, then choose an action for ${formatProposalMenuLabel(proposal)}.`, actions);
         if (!choice) return;
         state.approvalPromptDeferred = false;
         if (choice === "Approve") {
@@ -600,6 +604,12 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
           state.approvalResumePending = true;
           ctx.ui.notify(message, "success");
           dispatchApprovalDecision(ctx, message, `approve ${proposal.id}`);
+          return;
+        }
+        if (choice === "Apply approved change") {
+          state.approvalResumePending = true;
+          ctx.ui.notify(`Applying approved proposal ${proposal.id}.`, "success");
+          dispatchApprovalDecision(ctx, `Applying approved proposal ${proposal.id}.`, `approve ${proposal.id}`);
           return;
         }
         if (choice === "Defer") { const note = await ctx.ui.input("Defer note", "Why should this proposal be deferred?"); const message = deferSelectedProposals(hydratedApprovalDeps, ctx, [proposal.id], note); ctx.ui.notify(message, "info"); dispatchApprovalDecision(ctx, message, note ? `defer ${proposal.id}: ${note}` : `defer ${proposal.id}`); return; }
