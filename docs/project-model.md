@@ -24,8 +24,8 @@ typically Jira-synced and owned by you, not cogitator).
 
 ## `ProjectRecord`
 
-There is no on-disk metadata file. A record is derived from the filesystem +
-`INDEX.md`:
+There is no on-disk metadata file. A record is derived primarily from `INDEX.md`
+(with matching state-file existence used as a validity check):
 
 ```ts
 interface ProjectRecord {
@@ -33,18 +33,26 @@ interface ProjectRecord {
   name: string;        // from INDEX.md, else the file's first `# ` heading, else titleized id
   statePath: string;   // absolute path to <slug>.md
   artifactsDir: string;// <states-dir>/artifacts/<slug>
-  status?: string;     // from INDEX.md or the state file (in_progress/todo/blocked/done/deferred)
+  status?: string;     // from INDEX.md or the state file (canonicalized to in_progress/todo/blocked/done/deferred)
 }
 ```
 
 ## Selection
 
-`loadProjects()` lists `*.md` (excluding `INDEX.md`/`ARCHIVE.md`), then:
-1. Parses `INDEX.md` for display names, statuses, and ordering (any line with a
-   markdown link to a `*.md` file; a status token on the line is captured).
-2. For files absent from `INDEX.md`, reads the first `# ` heading and a `status:`
-   line for the name/status.
-3. Sorts by `INDEX.md` order first (curated/active first), then alphabetically.
+`loadProjects()` now uses `INDEX.md` as the primary source of truth for selectable
+projects:
+1. Parses `INDEX.md` for display names, statuses, and ordering. For markdown
+   table rows, the first column is used as the display name; otherwise the
+   markdown link label is used. A status token on the line is captured when present,
+   with common aliases normalized to canonical values (for example `to_do` → `todo`,
+   `finished` → `done`).
+2. Includes only entries whose referenced `<slug>.md` state file still exists in
+   the project states directory.
+3. Preserves `INDEX.md` ordering for the project picker.
+
+`ARCHIVE.md` remains the record of completed projects, but archived entries are only
+selectable if they are also intentionally present in `INDEX.md` with a non-inactive
+status. Unindexed markdown files are not treated as first-class selectable projects.
 
 `/project` shows the resulting list (`(id) name · status`). There is no repo-based
 auto-matching — the markdown-first model has no structured repo links.
@@ -56,6 +64,7 @@ Parsing is tolerant and looks for, when present:
 - `## Executive Summary` with a `Status:` line (e.g. `Status: **in_progress**`)
 - `## Background & Context`
 - `## Progress Tracking` with `todo`/`in_progress`/`blocked`/`done`/`deferred` bullet groups
+- status parsing tolerates a few legacy aliases and normalizes them to canonical values
 - `## Next Steps`
 
 ## `/new-project`

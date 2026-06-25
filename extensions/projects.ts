@@ -11,7 +11,7 @@
  * Import direction: workflow-mode.ts → projects.ts (never the reverse).
  */
 
-import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { isAbsolute, resolve, basename } from "node:path";
 
@@ -49,6 +49,10 @@ const NON_PROJECT_FILES = new Set([INDEX_FILENAME.toLowerCase(), ARCHIVE_FILENAM
 const PROJECT_CONTEXT_LIMIT = 32000;
 
 const STATUS_TOKENS = ["in_progress", "todo", "blocked", "done", "deferred"];
+const STATUS_ALIASES: Record<string, string> = {
+  to_do: "todo",
+  finished: "done",
+};
 
 // ─── Store path helpers ──────────────────────────────────────────────────────────
 
@@ -151,11 +155,17 @@ function extractFirstHeading(markdown: string): string | undefined {
   return markdown.match(/^#\s+(.+?)\s*$/m)?.[1]?.trim() || undefined;
 }
 
+function normalizeStatusToken(token: string | undefined): string | undefined {
+  const normalized = token?.toLowerCase();
+  if (!normalized) return undefined;
+  const canonical = STATUS_ALIASES[normalized] ?? normalized;
+  return STATUS_TOKENS.includes(canonical) ? canonical : undefined;
+}
+
 /** Best-effort status from a state file: `Status: **x**`, `- status: \`x\``, etc. */
 function extractStatusFromState(markdown: string): string | undefined {
   const match = markdown.match(/^\s*-?\s*status:\s*[`*]*([a-z_]+)[`*]*/mi);
-  const token = match?.[1]?.toLowerCase();
-  return token && STATUS_TOKENS.includes(token) ? token : undefined;
+  return normalizeStatusToken(match?.[1]);
 }
 
 // ─── Project path helpers ──────────────────────────────────────────────────────
@@ -180,6 +190,7 @@ export function isApprovalExemptPath(path: string, project: ProjectRecord | null
 // ─── INDEX.md parsing ────────────────────────────────────────────────────────────
 
 interface IndexEntry {
+  id: string;
   name: string;
   status?: string;
   /** Encounter order in INDEX.md, used for display ordering. */
@@ -191,17 +202,22 @@ interface IndexEntry {
  * any line containing a markdown link to a `*.md` file (table rows or bullets);
  * a status token elsewhere on the line is captured when present.
  */
-function parseIndex(indexText: string): Map<string, IndexEntry> {
-  const entries = new Map<string, IndexEntry>();
+function parseIndex(indexText: string): IndexEntry[] {
+  const entries: IndexEntry[] = [];
+  const seen = new Set<string>();
   let order = 0;
   for (const line of indexText.split(/\r?\n/)) {
     const link = line.match(/\[([^\]]+)\]\(([^)]+\.md)\)/);
     if (!link) continue;
     const id = projectIdFromFilename(link[2]);
     if (NON_PROJECT_FILES.has(`${id}.md`.toLowerCase())) continue;
-    if (entries.has(id)) continue;
-    const statusToken = STATUS_TOKENS.find((t) => new RegExp(`\\b${t}\\b`, "i").test(line));
-    entries.set(id, { name: link[1].trim(), status: statusToken, order: order++ });
+    if (seen.has(id)) continue;
+    const rawStatusMatch = line.match(/\b(in_progress|todo|blocked|done|deferred|to_do|finished)\b/i);
+    const statusToken = normalizeStatusToken(rawStatusMatch?.[1]);
+    const tableMatch = line.match(/^\|\s*([^|]+?)\s*\|\s*\[[^\]]+\]\([^)]+\.md\)\s*\|/);
+    const displayName = tableMatch?.[1]?.trim() || link[1].trim();
+    entries.push({ id, name: displayName, status: statusToken, order: order++ });
+    seen.add(id);
   }
   return entries;
 }
@@ -212,58 +228,27 @@ export async function loadProjects(): Promise<ProjectRecord[]> {
   const dir = getProjectStatesDir();
   const artifactsRoot = getArtifactsRoot();
 
-  let dirEntries: Awaited<ReturnType<typeof readdir>>;
+  let indexEntries: IndexEntry[] = [];
   try {
-    dirEntries = await readdir(dir, { withFileTypes: true });
+    indexEntries = parseIndex(await readFile(getIndexPath(), "utf8"));
   } catch {
     return [];
   }
 
-  let index = new Map<string, IndexEntry>();
-  try {
-    index = parseIndex(await readFile(getIndexPath(), "utf8"));
-  } catch {
-    // No INDEX.md — fall back to directory listing only.
-  }
-
   const projects: ProjectRecord[] = [];
-  for (const entry of dirEntries) {
-    if (!entry.isFile()) continue;
-    if (!entry.name.toLowerCase().endsWith(".md")) continue;
-    if (NON_PROJECT_FILES.has(entry.name.toLowerCase())) continue;
-
-    const id = projectIdFromFilename(entry.name);
-    const statePath = resolve(dir, entry.name);
-    const indexed = index.get(id);
-
-    let name = indexed?.name;
-    let status = indexed?.status;
-    if (!name || !status) {
-      try {
-        const text = await readFile(statePath, "utf8");
-        name = name ?? extractFirstHeading(text);
-        status = status ?? extractStatusFromState(text);
-      } catch {
-        // Unreadable file; fall back to a titleized id below.
-      }
-    }
-
+  for (const entry of indexEntries) {
+    const statePath = resolve(dir, `${entry.id}.md`);
+    if (!(await fileExists(statePath))) continue;
     projects.push({
-      id,
-      name: name ?? titleizeProjectId(id),
+      id: entry.id,
+      name: entry.name,
       statePath,
-      artifactsDir: resolve(artifactsRoot, id),
-      status,
+      artifactsDir: resolve(artifactsRoot, entry.id),
+      status: entry.status,
     });
   }
 
-  // INDEX.md order first (curated), then any remaining files alphabetically.
-  return projects.sort((a, b) => {
-    const ao = index.get(a.id)?.order ?? Number.MAX_SAFE_INTEGER;
-    const bo = index.get(b.id)?.order ?? Number.MAX_SAFE_INTEGER;
-    if (ao !== bo) return ao - bo;
-    return a.id.localeCompare(b.id);
-  });
+  return projects;
 }
 
 export async function loadProjectById(id: string): Promise<ProjectRecord | null> {

@@ -198,7 +198,7 @@ export function buildApprovalSummary(proposals: PendingProposal[]): ApprovalSumm
     if (proposal.status === "pending") summary.pending += 1;
     else if (proposal.status === "approved") summary.approved += 1;
     else if (proposal.status === "deferred") summary.deferred += 1;
-    else if (proposal.status === "needs-revision") summary.needsRevision += 1;
+    else if (proposal.status === "needs_revision") summary.needsRevision += 1;
     else if (proposal.status === "rejected") summary.rejected += 1;
     summary.items.push({
       id: proposal.id,
@@ -208,6 +208,16 @@ export function buildApprovalSummary(proposals: PendingProposal[]): ApprovalSumm
     });
   }
   return summary;
+}
+
+export function getApprovalMenuCandidates(proposals: PendingProposal[]): PendingProposal[] {
+  return proposals.filter((proposal) => proposal.status === "pending" || proposal.status === "approved");
+}
+
+export function getApprovalMenuActions(proposal: PendingProposal): string[] {
+  return proposal.status === "approved"
+    ? ["Apply approved change", "Revise", "Defer"]
+    : ["Approve", "Revise", "Defer"];
 }
 
 interface WorkflowRuntimeState {
@@ -576,7 +586,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
 
   async function promptForApproval(ctx: ExtensionContext): Promise<void> {
     const hydratedApprovalDeps = getHydratedApprovalDeps(ctx);
-    const menuCandidates = () => hydratedPs(ctx).filter((proposal) => proposal.status === "pending" || proposal.status === "approved");
+    const menuCandidates = () => getApprovalMenuCandidates(hydratedPs(ctx));
     if (!ctx.hasUI || menuCandidates().length === 0 || state.approvalPromptInFlight) return;
     state.approvalPromptInFlight = true;
     try {
@@ -593,9 +603,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
         const candidates = menuCandidates();
         const proposal = candidates.length === 1 ? candidates[0] : await selectProposal("Choose a proposed change to review");
         if (!proposal) return;
-        const actions = proposal.status === "approved"
-          ? ["Apply approved change", "Revise", "Defer"]
-          : ["Approve", "Revise", "Defer"];
+        const actions = getApprovalMenuActions(proposal);
         const choice = await ctx.ui.select(`Review the proposal in the transcript, then choose an action for ${formatProposalMenuLabel(proposal)}.`, actions);
         if (!choice) return;
         state.approvalPromptDeferred = false;
@@ -603,13 +611,11 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
           const message = approveSelectedProposals(hydratedApprovalDeps, ctx, [proposal.id]);
           state.approvalResumePending = true;
           ctx.ui.notify(message, "success");
-          dispatchApprovalDecision(ctx, message, `approve ${proposal.id}`);
           return;
         }
         if (choice === "Apply approved change") {
           state.approvalResumePending = true;
           ctx.ui.notify(`Applying approved proposal ${proposal.id}.`, "success");
-          dispatchApprovalDecision(ctx, `Applying approved proposal ${proposal.id}.`, `approve ${proposal.id}`);
           return;
         }
         if (choice === "Defer") { const note = await ctx.ui.input("Defer note", "Why should this proposal be deferred?"); const message = deferSelectedProposals(hydratedApprovalDeps, ctx, [proposal.id], note); ctx.ui.notify(message, "info"); dispatchApprovalDecision(ctx, message, note ? `defer ${proposal.id}: ${note}` : `defer ${proposal.id}`); return; }
@@ -777,7 +783,7 @@ export default function workflowModeExtension(pi: ExtensionAPI): void {
       if (state.approvalSummary.total === 0) { if (ctx.hasUI) ctx.ui.notify("No change proposals recorded for this session.", "info"); return; }
       hydratedPs(ctx);
       const proposals = ps();
-      const hasMenuCandidates = proposals.some((proposal) => proposal.status === "pending" || proposal.status === "approved");
+      const hasMenuCandidates = getApprovalMenuCandidates(proposals).length > 0;
       if (ctx.hasUI && hasMenuCandidates) {
         await promptForApproval(ctx);
         return;

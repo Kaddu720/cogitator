@@ -6,6 +6,9 @@
  */
 
 import assert from "node:assert";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // ─── Imports under test ─────────────────────────────────────────────────────────
 
@@ -50,6 +53,8 @@ import {
   SHUTDOWN_CHECKPOINT_END,
 } from "../project-state.js";
 
+import { loadProjects } from "../projects.js";
+
 import {
   isBlockedInfraMutationCommand,
   isSafeCommand,
@@ -65,6 +70,8 @@ import {
   shouldInjectProjectContext,
   buildApprovalSummary,
   emptyApprovalSummary,
+  getApprovalMenuCandidates,
+  getApprovalMenuActions,
 } from "../workflow-mode.js";
 
 import type { PendingProposal } from "../approvals/types.js";
@@ -840,6 +847,38 @@ test("buildApprovalSummary: keeps compact labels free of proposal numbering", ()
   ]);
 });
 
+test("getApprovalMenuCandidates: includes pending and approved proposals only", () => {
+  const proposals = [
+    makeProposal({ id: "pending", status: "pending" }),
+    makeProposal({ id: "approved", status: "approved" }),
+    makeProposal({ id: "deferred", status: "deferred" }),
+    makeProposal({ id: "rejected", status: "rejected" }),
+    makeProposal({ id: "applied", status: "applied" }),
+  ];
+  assert.deepStrictEqual(getApprovalMenuCandidates(proposals).map((proposal) => proposal.id), ["pending", "approved"]);
+});
+
+test("getApprovalMenuActions: returns apply action for approved proposals", () => {
+  assert.deepStrictEqual(getApprovalMenuActions(makeProposal({ status: "approved" })), ["Apply approved change", "Revise", "Defer"]);
+  assert.deepStrictEqual(getApprovalMenuActions(makeProposal({ status: "pending" })), ["Approve", "Revise", "Defer"]);
+});
+
+test("getApprovalMenuCandidates: matches /approval-status resumable states", () => {
+  const nonResumable = [
+    makeProposal({ id: "deferred", status: "deferred" }),
+    makeProposal({ id: "rejected", status: "rejected" }),
+    makeProposal({ id: "applied", status: "applied" }),
+    makeProposal({ id: "needs-revision", status: "needs_revision" }),
+  ];
+  assert.deepStrictEqual(getApprovalMenuCandidates(nonResumable).map((proposal) => proposal.id), []);
+
+  const resumable = [
+    makeProposal({ id: "approved", status: "approved" }),
+    makeProposal({ id: "applied", status: "applied" }),
+  ];
+  assert.deepStrictEqual(getApprovalMenuCandidates(resumable).map((proposal) => proposal.id), ["approved"]);
+});
+
 test("isProposalStatus: recognizes superseded", () => {
   assert.strictEqual(isProposalStatus("superseded"), true);
 });
@@ -893,6 +932,40 @@ test("supersedeProposalsForPath: marks old same-file proposals superseded", () =
   assert.deepStrictEqual(superseded.map((proposal) => proposal.id), ["old-pending", "old-approved"]);
   assert.ok(superseded.every((proposal) => proposal.supersededById === "new-change"));
   assert.strictEqual(current.find((proposal) => proposal.id === "new-change")?.status, "pending");
+});
+
+test("loadProjects: returns only indexed existing files in index order", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cogitator-projects-"));
+  const previous = process.env.COGITATOR_PROJECT_STATES_DIR;
+  try {
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "INDEX.md"), [
+      "# Project States Index",
+      "",
+      "## Standalone Active (`in_progress`)",
+      "",
+      "| Project | File | Last Date |",
+      "|---|---|---|",
+      "| Bravo Project | [bravo.md](bravo.md) | todo |",
+      "| Alpha Project | [alpha.md](alpha.md) | finished |",
+      "| Missing Project | [missing.md](missing.md) | to_do |",
+      "",
+    ].join("\n"));
+    writeFileSync(join(root, "alpha.md"), "# Alpha Project\n\nStatus: **in_progress**\n");
+    writeFileSync(join(root, "bravo.md"), "# Bravo Project\n\nStatus: **todo**\n");
+    writeFileSync(join(root, "orphan.md"), "# Orphan Project\n\nStatus: **in_progress**\n");
+    process.env.COGITATOR_PROJECT_STATES_DIR = root;
+
+    const projects = await loadProjects();
+    assert.deepStrictEqual(projects.map((project) => project.id), ["bravo", "alpha"]);
+    assert.deepStrictEqual(projects.map((project) => project.name), ["Bravo Project", "Alpha Project"]);
+    assert.deepStrictEqual(projects.map((project) => project.status), ["todo", "done"]);
+    assert.ok(projects.every((project) => project.statePath === join(root, `${project.id}.md`)));
+  } finally {
+    if (previous === undefined) delete process.env.COGITATOR_PROJECT_STATES_DIR;
+    else process.env.COGITATOR_PROJECT_STATES_DIR = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ─── Report ─────────────────────────────────────────────────────────────────────
