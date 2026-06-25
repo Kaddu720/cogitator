@@ -390,6 +390,8 @@ export default function (pi: ExtensionAPI) {
 	const homeDir = os.homedir();
 	const guestToolsDir = "/gondolin-tools/bin";
 	const hostToolsDir = path.join(homeDir, ".gondolin-tools", "bin");
+	const hostKubeDir = path.join(homeDir, ".kube");
+	const hostAzureDir = path.join(homeDir, ".azure");
 	const guestPath = `${guestToolsDir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`;
 
 	async function startVm(ctx?: ExtensionContext): Promise<VM> {
@@ -400,7 +402,8 @@ export default function (pi: ExtensionAPI) {
 			vfs: {
 				mounts: {
 					[GUEST_WORKSPACE]: new RealFSProvider(localCwd),
-					[homeDir]: new RealFSProvider(homeDir),
+					[path.join(homeDir, ".kube")]: new RealFSProvider(hostKubeDir),
+					[path.join(homeDir, ".azure")]: new RealFSProvider(hostAzureDir),
 					"/tmp": new RealFSProvider("/tmp"),
 					[guestToolsDir]: new ReadonlyProvider(new RealFSProvider(hostToolsDir)),
 				},
