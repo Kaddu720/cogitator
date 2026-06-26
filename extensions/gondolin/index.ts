@@ -329,8 +329,7 @@ function mergeGuestPath(env: NodeJS.ProcessEnv | undefined): Record<string, stri
 }
 
 function wrapCommandWithGuestPath(command: string): string {
-	const escaped = command.replace(/'/g, `'"'"'`);
-	return `export PATH="/gondolin-tools/bin:\${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"; printf '__COGI_GONDOLIN_BASH_PATH__=%s\n' "$PATH" 1>&2; bash -c '${escaped}'`;
+	return `export PATH="/gondolin-tools/bin:\${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"; printf '__COGI_GONDOLIN_BASH_PATH__=%s\n' "$PATH" 1>&2; ${command}`;
 }
 
 function createGondolinBashOps(vm: VM, localCwd: string, shellPath: string): BashOperations {
