@@ -179,6 +179,29 @@ export function buildApprovalBlockedReason(
  * new proposals array with matching approved/applying proposals transitioned to
  * `applied`, plus a count of how many were changed.
  */
+export function getCurrentProposalVariants(proposals: PendingProposal[]): PendingProposal[] {
+  const unresolved = proposals.filter((proposal) => proposal.status === "pending" || proposal.status === "approved" || proposal.status === "applying");
+  const latestBySlot = new Map<string, PendingProposal>();
+  for (const proposal of unresolved) {
+    const slotKey = `${proposal.index}/${proposal.total}::${proposal.resolvedPath}`;
+    const existing = latestBySlot.get(slotKey);
+    if (!existing || proposal.id.localeCompare(existing.id) > 0) {
+      latestBySlot.set(slotKey, proposal);
+    }
+  }
+  return unresolved.filter((proposal) => latestBySlot.get(`${proposal.index}/${proposal.total}::${proposal.resolvedPath}`)?.id === proposal.id);
+}
+
+export function getResumableProposalSet(proposals: PendingProposal[]): PendingProposal[] {
+  return getCurrentProposalVariants(proposals)
+    .filter((proposal) => proposal.status === "pending" || proposal.status === "approved")
+    .sort((a, b) => {
+      if (a.total !== b.total) return a.total - b.total;
+      if (a.index !== b.index) return a.index - b.index;
+      return a.id.localeCompare(b.id);
+    });
+}
+
 export function markCompletedProposals(
   proposals: PendingProposal[],
   text: string,
@@ -186,13 +209,25 @@ export function markCompletedProposals(
   const completed = extractCompletedChanges(text);
   if (completed.length === 0) return { proposals, count: 0 };
 
-  const keys = new Set(completed.map((e) => `${e.index}/${e.total}`));
+  const authorizedCurrent = getCurrentProposalVariants(proposals).filter(
+    (proposal) => proposal.status === "approved" || proposal.status === "applying",
+  );
+  const completionIds = new Set<string>();
+  for (const entry of completed) {
+    const matches = authorizedCurrent
+      .filter((proposal) => proposal.index === entry.index && proposal.total === entry.total)
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const newest = matches.at(-1);
+    if (newest) completionIds.add(newest.id);
+  }
+
+  if (completionIds.size === 0) return { proposals, count: 0 };
+
   let count = 0;
-  const updated = proposals.map((p) => {
-    if (p.status !== "approved" && p.status !== "applying") return p;
-    if (!keys.has(`${p.index}/${p.total}`)) return p;
+  const updated = proposals.map((proposal) => {
+    if (!completionIds.has(proposal.id)) return proposal;
     count += 1;
-    return transitionProposalStatus(p, "applied");
+    return transitionProposalStatus(proposal, "applied");
   });
   return { proposals: updated, count };
 }
@@ -210,7 +245,8 @@ export function markCompletedProposals(
  * Returns a new sorted array; does not mutate either input.
  */
 export function mergePendingProposals(current: PendingProposal[], next: PendingProposal[]): PendingProposal[] {
-  const merged = new Map(current.map((p) => [p.id, p]));
+  const unresolved = current.filter((proposal) => proposal.status === "pending" || proposal.status === "approved" || proposal.status === "applying");
+  const merged = new Map(unresolved.map((proposal) => [proposal.id, proposal]));
 
   for (const proposal of next) {
     const proposalId = resolveProposalIdForMerge(proposal, merged.values());
@@ -218,24 +254,16 @@ export function mergePendingProposals(current: PendingProposal[], next: PendingP
     const existingStatus = existing?.status;
     const mergedStatus: ProposalStatus =
       !existing ? "pending"
-      : existingStatus === "needs_revision" || existingStatus === "deferred" ? "pending"
-      : existingStatus ?? "pending";
-    const reset = existing && mergedStatus === "pending" && (existingStatus === "needs_revision" || existingStatus === "deferred");
+      : existingStatus === "approved" || existingStatus === "applying" ? existingStatus
+      : "pending";
 
     merged.set(proposalId, {
       ...proposal,
       id: proposalId,
       status: mergedStatus,
       sequenceKey: proposal.sequenceKey ?? existing?.sequenceKey,
-      revisionNote: reset ? undefined : existing?.revisionNote,
-      deferredNote: reset ? undefined : existing?.deferredNote,
-      supersededById: existing?.supersededById,
-      supersededReason: existing?.supersededReason,
       approvedAt: existing?.approvedAt,
       applyingAt: existing?.applyingAt,
-      appliedAt: existing?.appliedAt,
-      deferredAt: reset ? undefined : existing?.deferredAt,
-      supersededAt: existing?.supersededAt,
     });
   }
 

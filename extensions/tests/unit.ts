@@ -35,6 +35,8 @@ import {
   markCompletedProposals,
   describeProposalWorkflowState,
   transitionProposalStatus,
+  getCurrentProposalVariants,
+  getResumableProposalSet,
 } from "../approvals/policy.js";
 
 import {
@@ -72,9 +74,11 @@ import {
   emptyApprovalSummary,
   getApprovalMenuCandidates,
   getApprovalMenuActions,
+  getApprovalMenuFollowUpPayload,
 } from "../workflow-mode.js";
 
 import type { PendingProposal } from "../approvals/types.js";
+import { restoreNormalizedProposals } from "../approvals/state.js";
 
 // ─── Test runner ────────────────────────────────────────────────────────────────
 
@@ -115,6 +119,13 @@ function makeProposal(overrides: Partial<PendingProposal> = {}): PendingProposal
 
 test("normalizeInputPath: strips backticks", () => {
   assert.strictEqual(normalizeInputPath("`foo/bar.ts`"), "foo/bar.ts");
+});
+
+test("normalizeInputPath: preserves typed approval proposal ids", () => {
+  assert.strictEqual(
+    normalizeInputPath("`change-2-of-2-workspace-cogitator-extensions-workflow-mode-ts`"),
+    "change-2-of-2-workspace-cogitator-extensions-workflow-mode-ts",
+  );
 });
 
 test("normalizeInputPath: strips quotes", () => {
@@ -301,7 +312,7 @@ test("formatProposalSummary: formats correctly", () => {
 
 test("formatProposalMenuLabel: compact format", () => {
   const p = makeProposal({ index: 1, total: 2 });
-  assert.strictEqual(formatProposalMenuLabel(p), "Change 1/2");
+  assert.strictEqual(formatProposalMenuLabel(p), "Change 1/2 · test-file.ts — Add a comment");
 });
 
 test("formatProposalStatusCounts: empty", () => {
@@ -353,11 +364,11 @@ test("markCompletedProposals: ignores non-matching markers", () => {
   assert.strictEqual(result.proposals[0].status, "approved");
 });
 
-test("mergePendingProposals: adds new proposals", () => {
+test("mergePendingProposals: keeps only unresolved current proposals plus new proposals", () => {
   const existing = [makeProposal({ id: "a", status: "applied" })];
   const incoming = [makeProposal({ id: "b", file: "other.ts", normalizedFile: "other.ts", resolvedPath: "/tmp/other.ts" })];
   const result = mergePendingProposals(existing, incoming);
-  assert.ok(result.length >= 2);
+  assert.deepStrictEqual(result.map((proposal) => proposal.id), ["change-1-of-1-tmp-other-ts"]);
 });
 
 test("describeProposalWorkflowState: actionable pending", () => {
@@ -803,7 +814,7 @@ test("buildApprovalSummary: builds compact counts and labels", () => {
       total: 4,
       file: "d.ts",
       proposedEdit: "Edit D",
-      status: "needs-revision",
+      status: "needs_revision",
     }),
     makeProposal({
       id: "change-5",
@@ -847,20 +858,63 @@ test("buildApprovalSummary: keeps compact labels free of proposal numbering", ()
   ]);
 });
 
-test("getApprovalMenuCandidates: includes pending and approved proposals only", () => {
+test("formatProposalMenuLabel: includes identifying file and summary", () => {
+  assert.strictEqual(
+    formatProposalMenuLabel(makeProposal({
+      index: 2,
+      total: 3,
+      displayFile: "workflow-mode.ts",
+      proposedEdit: "direct menu apply for approved proposals",
+    })),
+    "Change 2/3 · workflow-mode.ts — direct menu apply for approved proposals",
+  );
+});
+
+test("getCurrentProposalVariants: keeps lexicographically newest variant per slot", () => {
   const proposals = [
-    makeProposal({ id: "pending", status: "pending" }),
-    makeProposal({ id: "approved", status: "approved" }),
-    makeProposal({ id: "deferred", status: "deferred" }),
-    makeProposal({ id: "rejected", status: "rejected" }),
-    makeProposal({ id: "applied", status: "applied" }),
+    makeProposal({ id: "slot-a-old", index: 1, total: 3, resolvedPath: "/tmp/a.ts", status: "approved" }),
+    makeProposal({ id: "slot-a-new", index: 1, total: 3, resolvedPath: "/tmp/a.ts", status: "pending" }),
+    makeProposal({ id: "slot-b", index: 2, total: 3, resolvedPath: "/tmp/b.ts", status: "approved" }),
   ];
-  assert.deepStrictEqual(getApprovalMenuCandidates(proposals).map((proposal) => proposal.id), ["pending", "approved"]);
+  assert.deepStrictEqual(getCurrentProposalVariants(proposals).map((proposal) => proposal.id), ["slot-a-old", "slot-b"]);
+});
+
+test("getResumableProposalSet: includes only current pending or approved proposals", () => {
+  const proposals = [
+    makeProposal({ id: "stale-approved", index: 1, total: 3, resolvedPath: "/tmp/a.ts", status: "approved" }),
+    makeProposal({ id: "current-pending", index: 1, total: 3, resolvedPath: "/tmp/a.ts", status: "pending" }),
+    makeProposal({ id: "current-approved", index: 2, total: 3, resolvedPath: "/tmp/b.ts", status: "approved" }),
+    makeProposal({ id: "deferred", index: 3, total: 3, resolvedPath: "/tmp/c.ts", status: "deferred" }),
+  ];
+  assert.deepStrictEqual(getResumableProposalSet(proposals).map((proposal) => proposal.id), ["stale-approved", "current-approved"]);
+});
+
+test("getApprovalMenuCandidates: includes only filtered resumable proposals", () => {
+  const proposals = [
+    makeProposal({ id: "old-approved", index: 1, total: 2, resolvedPath: "/tmp/a.ts", status: "approved" }),
+    makeProposal({ id: "new-pending", index: 1, total: 2, resolvedPath: "/tmp/a.ts", status: "pending" }),
+    makeProposal({ id: "approved", index: 2, total: 2, resolvedPath: "/tmp/b.ts", status: "approved" }),
+    makeProposal({ id: "applied", index: 3, total: 3, resolvedPath: "/tmp/c.ts", status: "applied" }),
+  ];
+  assert.deepStrictEqual(getApprovalMenuCandidates(proposals).map((proposal) => proposal.id), ["old-approved", "approved"]);
 });
 
 test("getApprovalMenuActions: returns apply action for approved proposals", () => {
   assert.deepStrictEqual(getApprovalMenuActions(makeProposal({ status: "approved" })), ["Apply approved change", "Revise", "Defer"]);
   assert.deepStrictEqual(getApprovalMenuActions(makeProposal({ status: "pending" })), ["Approve", "Revise", "Defer"]);
+});
+
+test("getApprovalMenuFollowUpPayload: resumes model after approve and apply", () => {
+  assert.strictEqual(getApprovalMenuFollowUpPayload("Approve", "change-123"), "resume approved proposal change-123");
+  assert.strictEqual(getApprovalMenuFollowUpPayload("Apply approved change", "change-123"), "resume approved proposal change-123");
+  assert.notStrictEqual(getApprovalMenuFollowUpPayload("Approve", "change-123"), "approve change-123");
+});
+
+test("getApprovalMenuFollowUpPayload: preserves defer and revise payload formats", () => {
+  assert.strictEqual(getApprovalMenuFollowUpPayload("Defer", "change-123"), "defer change-123");
+  assert.strictEqual(getApprovalMenuFollowUpPayload("Defer", "change-123", "wait for review"), "defer change-123: wait for review");
+  assert.strictEqual(getApprovalMenuFollowUpPayload("Revise", "change-123"), "edit change-123");
+  assert.strictEqual(getApprovalMenuFollowUpPayload("Revise", "change-123", "split the diff"), "edit change-123: split the diff");
 });
 
 test("getApprovalMenuCandidates: matches /approval-status resumable states", () => {
@@ -869,14 +923,28 @@ test("getApprovalMenuCandidates: matches /approval-status resumable states", () 
     makeProposal({ id: "rejected", status: "rejected" }),
     makeProposal({ id: "applied", status: "applied" }),
     makeProposal({ id: "needs-revision", status: "needs_revision" }),
+    makeProposal({ id: "superseded", status: "superseded" }),
   ];
   assert.deepStrictEqual(getApprovalMenuCandidates(nonResumable).map((proposal) => proposal.id), []);
 
   const resumable = [
-    makeProposal({ id: "approved", status: "approved" }),
-    makeProposal({ id: "applied", status: "applied" }),
+    makeProposal({ id: "approved", index: 1, total: 2, resolvedPath: "/tmp/a.ts", status: "approved" }),
+    makeProposal({ id: "applied", index: 2, total: 2, resolvedPath: "/tmp/b.ts", status: "applied" }),
   ];
   assert.deepStrictEqual(getApprovalMenuCandidates(resumable).map((proposal) => proposal.id), ["approved"]);
+});
+
+test("markCompletedProposals: only completes newest authorized repeated slot", () => {
+  const proposals = [
+    makeProposal({ id: "old-approved", index: 1, total: 3, resolvedPath: "/tmp/a.ts", status: "approved" }),
+    makeProposal({ id: "new-approved", index: 1, total: 3, resolvedPath: "/tmp/a.ts", status: "approved" }),
+    makeProposal({ id: "other-approved", index: 2, total: 3, resolvedPath: "/tmp/b.ts", status: "approved" }),
+  ];
+  const result = markCompletedProposals(proposals, "Change 1/3 is complete.");
+  assert.strictEqual(result.count, 1);
+  assert.strictEqual(result.proposals.find((proposal) => proposal.id === "old-approved")?.status, "applied");
+  assert.strictEqual(result.proposals.find((proposal) => proposal.id === "new-approved")?.status, "approved");
+  assert.strictEqual(result.proposals.find((proposal) => proposal.id === "other-approved")?.status, "approved");
 });
 
 test("isProposalStatus: recognizes superseded", () => {
@@ -932,6 +1000,11 @@ test("supersedeProposalsForPath: marks old same-file proposals superseded", () =
   assert.deepStrictEqual(superseded.map((proposal) => proposal.id), ["old-pending", "old-approved"]);
   assert.ok(superseded.every((proposal) => proposal.supersededById === "new-change"));
   assert.strictEqual(current.find((proposal) => proposal.id === "new-change")?.status, "pending");
+});
+
+test("restoreNormalizedProposals: returns no live proposals on resume", () => {
+  const fakeCtx = {} as never;
+  assert.deepStrictEqual(restoreNormalizedProposals(fakeCtx, "/workspace"), []);
 });
 
 test("loadProjects: returns only indexed existing files in index order", async () => {

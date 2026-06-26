@@ -1,63 +1,15 @@
 /**
- * approvals/state.ts — approval gate session persistence and proposal normalization.
+ * approvals/state.ts — approval gate session persistence and compact summary restore.
  *
  * This module owns reading and writing approval state to the pi session branch.
- * It also handles the legacy migration from path-count tracking to proposal IDs.
+ * Live proposal detail is intentionally not restored across resumed sessions.
  *
  * Import direction: workflow-mode.ts → approvals/state.ts → approvals/types.ts
- *                                                          → approvals/parse.ts
- *                                                          → ../projects.ts
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type PendingProposal, type StoredApprovalGateState, type StoredApprovalSummaryState } from "./types.js";
-import { normalizePendingProposal } from "./parse.js";
-import { type ResolutionOptions, getResolutionBase } from "../projects.js";
-
-// ─── Legacy migration helpers ───────────────────────────────────────────────────
-
-/**
- * Convert a legacy `{ path → count }` record into a Map for migration during
- * `normalizePendingProposals`. Ignores non-positive counts.
- */
-export function recordToCounts(record: Record<string, number> | undefined): Map<string, number> {
-  const counts = new Map<string, number>();
-  if (!record || typeof record !== "object") return counts;
-  for (const [path, count] of Object.entries(record)) {
-    if (typeof count === "number" && Number.isFinite(count) && count > 0) counts.set(path, count);
-  }
-  return counts;
-}
-
-// ─── Proposal normalization ─────────────────────────────────────────────────────
-
-/**
- * Normalize a raw pending-proposal array restored from session storage.
- *
- * - Deserializes each entry via `normalizePendingProposal`.
- * - Migrates any legacy `approvedPathCounts` entries by upgrading matching
- *   `pending` proposals to `approved` status.
- */
-export function normalizePendingProposals(
-  pending: unknown,
-  resolutionBase: string,
-  legacyApprovedPathCounts?: Record<string, number>,
-): PendingProposal[] {
-  if (!Array.isArray(pending)) return [];
-  const approvedCounts = recordToCounts(legacyApprovedPathCounts);
-
-  return pending
-    .map((p) => normalizePendingProposal(p, resolutionBase))
-    .filter((p): p is PendingProposal => p !== undefined && p.normalizedFile.length > 0 && p.resolvedPath.length > 0)
-    .map((p) => {
-      if (p.status !== "pending") return p;
-      const remaining = approvedCounts.get(p.resolvedPath) ?? 0;
-      if (remaining <= 0) return p;
-      if (remaining === 1) { approvedCounts.delete(p.resolvedPath); }
-      else { approvedCounts.set(p.resolvedPath, remaining - 1); }
-      return { ...p, status: "approved" as const };
-    });
-}
+import { type ResolutionOptions } from "../projects.js";
 
 // ─── Session persistence ────────────────────────────────────────────────────────
 
@@ -89,13 +41,15 @@ export function restoreApprovalGateState(ctx: ExtensionContext): StoredApprovalG
 }
 
 /**
- * Convenience wrapper: restore the approval gate state and normalize the
- * pending proposals array in one call.
+ * Restore live approval proposals for the current session.
+ *
+ * Approval proposal detail is intentionally not rehydrated from persisted
+ * session-branch history. This avoids resurrecting stale historical proposals
+ * into a fresh resumed session. Only compact summary state may be restored for
+ * status display; live proposals begin empty and repopulate from new turns.
  */
-export function restoreNormalizedProposals(ctx: ExtensionContext, cwd: string | undefined, options?: ResolutionOptions): PendingProposal[] {
-  const stored = restoreApprovalGateState(ctx);
-  const resolutionBase = getResolutionBase(cwd, options);
-  return normalizePendingProposals(stored?.pending, resolutionBase, stored?.approvedPathCounts);
+export function restoreNormalizedProposals(_ctx: ExtensionContext, _cwd: string | undefined, _options?: ResolutionOptions): PendingProposal[] {
+  return [];
 }
 
 export function restoreApprovalSummaryState(ctx: ExtensionContext): StoredApprovalSummaryState | undefined {

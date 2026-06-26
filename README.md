@@ -127,7 +127,7 @@ This lets you keep project tracking up to date across related state files during
 
 ## Transactional approval gate
 
-The bundled extension now enforces a stateful approval gate for `write` and `edit` tool calls.
+The bundled extension enforces a current-session approval gate for `write` and `edit` tool calls.
 
 Flow:
 
@@ -139,20 +139,21 @@ File: <path>
 Proposed edit: <summary>
 ```
 
-2. The extension captures those proposed file paths.
+2. The extension captures those proposed file paths in live in-memory session state.
 3. Until you approve them, `write` and `edit` are blocked.
 4. You respond with:
    - `a` or `approve`
    - `e` or `edit`
    - `r` or `reject`
-5. You can also use `/approval-status` to reopen the interactive approval menu for pending or already-approved proposals; approved proposals surface an `Apply approved change` action, and the menu acts directly on the selected proposal instead of replaying a text selector.
+5. You can also use `/approval-status` to reopen the interactive approval menu for current-session pending or already-approved proposals; approved proposals surface an `Apply approved change` action, and the menu acts directly on the selected proposal instead of replaying a text selector.
 6. After approval, only the approved file paths are unlocked for mutation.
 
 Notes:
 
 - this is path-based transactional gating, not content-diff verification
-- menu approvals now hand control back to the assistant so an approved change can apply before the review UI reopens for any remaining pending proposals
-- typed selector actions such as `reject <id>` and `edit <id>: ...` can target already-approved proposals when you need to revise or clear them
+- live proposal detail is intentionally not restored from historical session state on resume; stale old proposals should not resurface as actionable items in a fresh session
+- menu approvals hand control back to the assistant so an approved change can apply immediately
+- typed selector actions such as `reject <id>` and `edit <id>: ...` can target already-approved current-session proposals when you need to revise or clear them
 - in `/plan`, the gate is combined with the project-state/artifact-only write policy
 - in all modes, `bash` commands containing `sops` are blocked
 

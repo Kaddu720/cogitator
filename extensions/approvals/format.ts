@@ -33,10 +33,16 @@ export function formatProposalSummary(proposal: PendingProposal): string {
 
 /**
  * Compact label shown in the approval-menu action picker.
- * Example: `Change 2/3`
+ * Example: `Change 2/3 · extensions/workflow-mode.ts — Add import from ./projects.js`
  */
 export function formatProposalMenuLabel(proposal: PendingProposal): string {
-  return `Change ${proposal.index}/${proposal.total}`;
+  const change = `Change ${proposal.index}/${proposal.total}`;
+  const file = proposal.displayFile || proposal.file || proposal.normalizedFile || proposal.rawFile;
+  const summary = proposal.proposedEdit?.trim();
+  if (file && summary) return `${change} · ${file} — ${summary}`;
+  if (file) return `${change} · ${file}`;
+  if (summary) return `${change} — ${summary}`;
+  return change;
 }
 
 // ─── Status count summary ───────────────────────────────────────────────────────
