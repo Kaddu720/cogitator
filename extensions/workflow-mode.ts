@@ -212,7 +212,9 @@ export function buildApprovalSummary(proposals: PendingProposal[]): ApprovalSumm
 }
 
 export function getApprovalMenuCandidates(proposals: PendingProposal[]): PendingProposal[] {
-  return getResumableProposalSet(proposals);
+  return getResumableProposalSet(proposals).filter(
+    (proposal) => proposal.status === "pending" && isProposalActionable(proposals, proposal),
+  );
 }
 
 export function getApprovalMenuActions(proposal: PendingProposal): string[] {

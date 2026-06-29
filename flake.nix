@@ -50,6 +50,7 @@
         piVersion = (builtins.fromJSON (builtins.readFile "${inputs.pi}/packages/coding-agent/package.json")).version;
         piPackageLock = ./pi-package-lock.json;
         piWebAccessSrc = inputs.pi-web-access;
+        piWebAccessPackageLock = ./pi-web-access-package-lock.json;
         ponytailSrc = inputs.ponytail;
         # pi-mcp-adapter (community MCP bridge, same author as pi-web-access). The
         # repo ships no lockfile, so vendor a generated production lock and strip
@@ -150,17 +151,24 @@
           nativeBuildInputs = [ pkgs.makeWrapper ];
         };
 
+        piWebAccessSrcWithLock = pkgs.runCommand "pi-web-access-src" {} ''
+          cp -r ${piWebAccessSrc} $out
+          chmod -R u+w $out
+          cp ${piWebAccessPackageLock} $out/package-lock.json
+        '';
+
         piWebAccessPkg = pkgs.buildNpmPackage rec {
           pname = "pi-web-access";
           version = inputs.pi-web-access.rev or "unstable";
-          src = piWebAccessSrc;
+          src = piWebAccessSrcWithLock;
           npmDeps = pkgs.importNpmLock {
-            npmRoot = piWebAccessSrc;
+            npmRoot = piWebAccessSrcWithLock;
           };
           npmConfigHook = pkgs.importNpmLock.npmConfigHook;
 
           dontNpmBuild = true;
           npmPackFlags = [ "--ignore-scripts" ];
+          npmFlags = [ "--legacy-peer-deps" ];
         };
 
         piMcpAdapterSrcWithLock = pkgs.runCommand "pi-mcp-adapter-src" {} ''

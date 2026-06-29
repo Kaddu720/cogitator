@@ -145,7 +145,7 @@ Proposed edit: <summary>
    - `a` or `approve`
    - `e` or `edit`
    - `r` or `reject`
-5. You can also use `/approval-status` to reopen the interactive approval menu for current-session pending or already-approved proposals; approved proposals surface an `Apply approved change` action, and the menu acts directly on the selected proposal instead of replaying a text selector.
+5. You can also use `/approval-status` to reopen the interactive approval menu for actionable current-session pending proposals. Already-approved proposals still appear in the text summary, but they no longer appear in the interactive approval list.
 6. After approval, only the approved file paths are unlocked for mutation.
 
 Notes:

@@ -51,7 +51,16 @@ The active project's state file (`<project-states-dir>/<slug>.md`) is exempt fro
 
 The assistant must emit `Change N/Total is complete.` after successfully applying an approved change. This transitions the proposal to `applied` status and unblocks any subsequent sequence steps.
 
+## `/approval-status` behavior
+
+`/approval-status` can reopen the interactive approval menu, but that menu now shows only actionable `pending` proposals. Already-approved proposals may still appear in the text summary for inspection, but they are no longer shown as interactive approval-list candidates.
+
+## Path resolution requirements
+
+Approval application is keyed by the proposal's resolved path. The approved proposal path and the eventual mutation target must resolve identically. If a proposal is approved against `/workspace/...` but a later mutation targets a host path like `/Users/...`, the approval gate will block the mutation even when the file is logically the same.
+
 ## Known issues
 
 - Proposals in `applying` state block path writes but cannot be targeted by `reject` or `edit` commands. They resolve on completion marker or session restart.
 - Historical collided proposal IDs may appear in `/approval-status` alongside current proposals.
+- Host-path versus guest-path mismatches can cause valid-looking approvals to fail application when the resolved paths differ.

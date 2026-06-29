@@ -889,14 +889,14 @@ test("getResumableProposalSet: includes only current pending or approved proposa
   assert.deepStrictEqual(getResumableProposalSet(proposals).map((proposal) => proposal.id), ["stale-approved", "current-approved"]);
 });
 
-test("getApprovalMenuCandidates: includes only filtered resumable proposals", () => {
+test("getApprovalMenuCandidates: includes only actionable pending proposals", () => {
   const proposals = [
     makeProposal({ id: "old-approved", index: 1, total: 2, resolvedPath: "/tmp/a.ts", status: "approved" }),
     makeProposal({ id: "new-pending", index: 1, total: 2, resolvedPath: "/tmp/a.ts", status: "pending" }),
     makeProposal({ id: "approved", index: 2, total: 2, resolvedPath: "/tmp/b.ts", status: "approved" }),
-    makeProposal({ id: "applied", index: 3, total: 3, resolvedPath: "/tmp/c.ts", status: "applied" }),
+    makeProposal({ id: "pending", index: 3, total: 3, resolvedPath: "/tmp/c.ts", status: "pending" }),
   ];
-  assert.deepStrictEqual(getApprovalMenuCandidates(proposals).map((proposal) => proposal.id), ["old-approved", "approved"]);
+  assert.deepStrictEqual(getApprovalMenuCandidates(proposals).map((proposal) => proposal.id), ["pending"]);
 });
 
 test("getApprovalMenuActions: returns apply action for approved proposals", () => {
@@ -917,21 +917,18 @@ test("getApprovalMenuFollowUpPayload: preserves defer and revise payload formats
   assert.strictEqual(getApprovalMenuFollowUpPayload("Revise", "change-123", "split the diff"), "edit change-123: split the diff");
 });
 
-test("getApprovalMenuCandidates: matches /approval-status resumable states", () => {
-  const nonResumable = [
+test("getApprovalMenuCandidates: excludes non-pending and blocked proposals", () => {
+  const nonActionable = [
     makeProposal({ id: "deferred", status: "deferred" }),
     makeProposal({ id: "rejected", status: "rejected" }),
     makeProposal({ id: "applied", status: "applied" }),
     makeProposal({ id: "needs-revision", status: "needs_revision" }),
     makeProposal({ id: "superseded", status: "superseded" }),
-  ];
-  assert.deepStrictEqual(getApprovalMenuCandidates(nonResumable).map((proposal) => proposal.id), []);
-
-  const resumable = [
     makeProposal({ id: "approved", index: 1, total: 2, resolvedPath: "/tmp/a.ts", status: "approved" }),
-    makeProposal({ id: "applied", index: 2, total: 2, resolvedPath: "/tmp/b.ts", status: "applied" }),
+    makeProposal({ id: "blocked", index: 2, total: 2, resolvedPath: "/tmp/b.ts", status: "pending", sequenceKey: "seq" }),
+    makeProposal({ id: "first", index: 1, total: 2, resolvedPath: "/tmp/c.ts", status: "pending", sequenceKey: "seq" }),
   ];
-  assert.deepStrictEqual(getApprovalMenuCandidates(resumable).map((proposal) => proposal.id), ["approved"]);
+  assert.deepStrictEqual(getApprovalMenuCandidates(nonActionable).map((proposal) => proposal.id), ["first"]);
 });
 
 test("markCompletedProposals: only completes newest authorized repeated slot", () => {
